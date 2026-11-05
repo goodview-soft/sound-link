@@ -60,8 +60,6 @@ const C_OK := Color("#34d399")
 const C_DANGER := Color("#f87171")
 var host_box: VBoxContainer
 var client_box: VBoxContainer
-var btn_host: Button
-var btn_client: Button
 var dev_opt: OptionButton
 var host_btn: Button
 var host_status: Label
@@ -80,7 +78,7 @@ var pill_txt: Label
 var upd_card: PanelContainer
 var home_box: VBoxContainer
 var head_box: HBoxContainer
-var tabs_seg: PanelContainer
+var ip_chip: Label
 var app_box: VBoxContainer
 var conn_lbl: Label
 var found_lbl: Label
@@ -262,7 +260,7 @@ class HeroWave extends Control:
 	var t := 0.0
 
 	func _init() -> void:
-		custom_minimum_size.y = 46
+		custom_minimum_size.y = 36
 		size_flags_horizontal = SIZE_EXPAND_FILL
 
 	func _process(d: float) -> void:
@@ -282,28 +280,86 @@ class HeroWave extends Control:
 			draw_rect(Rect2(i * w + w * 0.25, mid - h / 2, w * 0.5, h), Color(c, 0.35 + 0.5 * env))
 
 
-class ModeIcon extends Control:
-	## Pastille ronde avec un pictogramme Wi-Fi dessiné.
-	var hover := false:
-		set(v):
-			hover = v
-			queue_redraw()
+class Icon extends Control:
+	## Pictogrammes vectoriels dessinés sur une grille 24×24.
+	var kind := ""
+	var color := Color("#e7eaf0")
+	var scale_f := 1.0
+	var _o := Vector2.ZERO
+	var _u := 1.0
 
-	func _init() -> void:
-		custom_minimum_size = Vector2(52, 52)
-		size_flags_vertical = SIZE_SHRINK_CENTER
+	func _init(k: String, sz := 22.0, c := Color("#e7eaf0")) -> void:
+		kind = k
+		color = c
+		if sz > 0:
+			custom_minimum_size = Vector2(sz, sz)
 		mouse_filter = MOUSE_FILTER_IGNORE
+		size_flags_vertical = SIZE_SHRINK_CENTER
+
+	func set_kind(k: String, c := Color(0, 0, 0, 0)) -> void:
+		kind = k
+		if c.a > 0:
+			color = c
+		queue_redraw()
+
+	func _p(x: float, y: float) -> Vector2:
+		return _o + Vector2(x, y) * _u
+
+	func _line(pts: Array, w: float) -> void:
+		var v := PackedVector2Array()
+		for q in pts:
+			v.append(_p(q.x, q.y))
+		draw_polyline(v, color, w, true)
 
 	func _draw() -> void:
-		var c := size / 2.0
-		var acc := Color("#7c6cff")
-		draw_circle(c, 26, Color(acc, 0.28 if hover else 0.16))
-		draw_arc(c, 25.5, 0, TAU, 48, Color(acc, 0.7), 1.5, true)
-		var fg := Color("#e7eaf0")
-		var o := c + Vector2(0, 8)
-		for r in [7.0, 13.0, 19.0]:
-			draw_arc(o, r, deg_to_rad(-135), deg_to_rad(-45), 20, fg, 2.5, true)
-		draw_circle(o, 2.6, fg)
+		var sz := minf(size.x, size.y) * scale_f
+		_o = (size - Vector2(sz, sz)) / 2.0
+		_u = sz / 24.0
+		var w := maxf(1.5, 2.0 * _u)
+		var c := color
+		match kind:
+			"back":
+				_line([Vector2(15, 5), Vector2(8, 12), Vector2(15, 19)], w)
+			"play":
+				draw_colored_polygon(PackedVector2Array([_p(8, 5), _p(19, 12), _p(8, 19)]), c)
+			"stop":
+				draw_rect(Rect2(_p(7, 7), Vector2(10, 10) * _u), c)
+			"speaker", "speaker_off":
+				draw_colored_polygon(PackedVector2Array([_p(3, 9), _p(7, 9), _p(12, 5), _p(12, 19), _p(7, 15), _p(3, 15)]), c)
+				if kind == "speaker":
+					draw_arc(_p(12, 12), 4.5 * _u, -0.9, 0.9, 12, c, w, true)
+					draw_arc(_p(12, 12), 8.5 * _u, -0.9, 0.9, 16, c, w, true)
+				else:
+					_line([Vector2(15, 9), Vector2(21, 15)], w)
+					_line([Vector2(21, 9), Vector2(15, 15)], w)
+			"mic", "mic_off":
+				draw_circle(_p(12, 7), 3.5 * _u, c)
+				draw_rect(Rect2(_p(8.5, 7), Vector2(7, 5) * _u), c)
+				draw_circle(_p(12, 12), 3.5 * _u, c)
+				draw_arc(_p(12, 11), 6.5 * _u, 0.0, PI, 16, c, w, true)
+				_line([Vector2(12, 17.5), Vector2(12, 21)], w)
+				_line([Vector2(8.5, 21), Vector2(15.5, 21)], w)
+				if kind == "mic_off":
+					draw_line(_p(4, 3), _p(20, 21), Color("#0e1015"), w * 2.2, true)
+					draw_line(_p(4, 3), _p(20, 21), c, w, true)
+			"broadcast":
+				draw_circle(_p(12, 12), 2.6 * _u, c)
+				for r in [5.5, 9.5]:
+					draw_arc(_p(12, 12), r * _u, -0.75, 0.75, 14, c, w, true)
+					draw_arc(_p(12, 12), r * _u, PI - 0.75, PI + 0.75, 14, c, w, true)
+			"headphones":
+				draw_arc(_p(12, 13), 8.5 * _u, PI, TAU, 24, c, w, true)
+				draw_rect(Rect2(_p(2.5, 13), Vector2(4.5, 7.5) * _u), c)
+				draw_rect(Rect2(_p(17, 13), Vector2(4.5, 7.5) * _u), c)
+			"qr":
+				for q in [Vector2(3, 3), Vector2(14, 3), Vector2(3, 14)]:
+					draw_rect(Rect2(_p(q.x, q.y), Vector2(7, 7) * _u), c, false, w)
+					draw_rect(Rect2(_p(q.x + 2.5, q.y + 2.5), Vector2(2, 2) * _u), c)
+				draw_rect(Rect2(_p(14, 14), Vector2(3, 3) * _u), c)
+				draw_rect(Rect2(_p(18, 18), Vector2(3, 3) * _u), c)
+			"refresh":
+				draw_arc(_p(12, 12), 7 * _u, -0.3, PI * 1.55, 24, c, w, true)
+				draw_colored_polygon(PackedVector2Array([_p(19.5, 6), _p(20, 12), _p(14.5, 10)]), c)
 
 
 class LevelMeter extends Control:
@@ -348,6 +404,9 @@ func _ready() -> void:
 	_build_ui()
 	_set_mode(cfg.get_value("app", "mode", "client"))
 	_check_update()
+	for arg in OS.get_cmdline_user_args():  # ex. -- --page=host
+		if arg in ["--page=host", "--page=client"]:
+			_open(arg.substr(7))
 
 
 func _exit_tree() -> void:
@@ -381,227 +440,207 @@ func _build_ui() -> void:
 	add_child(scroll)
 	var margin := MarginContainer.new()
 	margin.size_flags_horizontal = SIZE_EXPAND_FILL
-	for s in ["left", "right", "top", "bottom"]:
-		margin.add_theme_constant_override("margin_" + s, 18)
+	for side in ["left", "right", "top", "bottom"]:
+		margin.add_theme_constant_override("margin_" + side, 18)
 	scroll.add_child(margin)
 	var root := VBoxContainer.new()
-	root.add_theme_constant_override("separation", 14)
+	root.add_theme_constant_override("separation", 16)
 	margin.add_child(root)
 
-	# --- En-tête : titre + pastille d'état
-	var head := HBoxContainer.new()
-	head_box = head
-	head.visible = false
-	root.add_child(head)
-	var tb := VBoxContainer.new()
-	tb.size_flags_horizontal = SIZE_EXPAND_FILL
-	tb.add_theme_constant_override("separation", 0)
-	head.add_child(tb)
-	var title := _label("Sound Link", tb)
-	title.add_theme_font_size_override("font_size", 28)
-	_hint("Partage audio sur le réseau local  ·  v" + VERSION, tb)
+	# --- Barre du haut (pages)
+	head_box = HBoxContainer.new()
+	head_box.add_theme_constant_override("separation", 10)
+	head_box.visible = false
+	root.add_child(head_box)
+	_icon_btn("back", head_box).pressed.connect(_go_home)
+	conn_lbl = _label("", head_box)
+	conn_lbl.add_theme_font_size_override("font_size", 22)
+	conn_lbl.size_flags_horizontal = SIZE_EXPAND_FILL
 	var pill := PanelContainer.new()
 	pill.add_theme_stylebox_override("panel", _sb(C_FIELD, 20, 12, 6, C_BORDER))
 	pill.size_flags_vertical = SIZE_SHRINK_CENTER
-	head.add_child(pill)
+	head_box.add_child(pill)
 	var ph := HBoxContainer.new()
 	pill.add_child(ph)
 	pill_dot = _label("●", ph)
 	pill_txt = _label("", ph)
 	pill_txt.add_theme_font_size_override("font_size", 13)
 
+	# --- Accueil
 	home_box = VBoxContainer.new()
-	home_box.add_theme_constant_override("separation", 14)
+	home_box.add_theme_constant_override("separation", 18)
 	root.add_child(home_box)
-	app_box = VBoxContainer.new()
-	app_box.add_theme_constant_override("separation", 14)
-	app_box.visible = false
-	root.add_child(app_box)
-
-	# --- Accueil : héros
-	var hero := VBoxContainer.new()
-	hero.add_theme_constant_override("separation", 4)
-	home_box.add_child(hero)
+	var sp := Control.new()
+	sp.custom_minimum_size.y = 24
+	home_box.add_child(sp)
 	var logo := TextureRect.new()
 	logo.texture = load("res://icon.svg")
 	logo.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
 	logo.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-	logo.custom_minimum_size = Vector2(84, 84)
-	hero.add_child(logo)
-	var ht := _label("Sound Link", hero)
-	ht.add_theme_font_size_override("font_size", 34)
+	logo.custom_minimum_size = Vector2(76, 76)
+	home_box.add_child(logo)
+	var ht := _label("Sound Link", home_box)
+	ht.add_theme_font_size_override("font_size", 32)
 	ht.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	var hs2 := _hint("Le son de ton PC sur ton téléphone,\net ton téléphone comme micro du PC.", hero)
-	hs2.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	hs2.add_theme_font_size_override("font_size", 14)
-	hero.add_child(HeroWave.new())
-
-	# --- Accueil : mises à jour + choix du mode
+	home_box.add_child(HeroWave.new())
+	var tiles := HBoxContainer.new()
+	tiles.add_theme_constant_override("separation", 12)
+	home_box.add_child(tiles)
+	_tile(tiles, "broadcast", "Diffuser", "host")
+	_tile(tiles, "headphones", "Écouter", "client")
 	upd_card = PanelContainer.new()
-	upd_card.add_theme_stylebox_override("panel", _sb(C_CARD, 12, 14, 8, C_BORDER))
+	upd_card.add_theme_stylebox_override("panel", _sb(C_CARD, 20, 14, 6, C_BORDER))
+	upd_card.size_flags_horizontal = SIZE_SHRINK_CENTER
 	home_box.add_child(upd_card)
 	var uh := HBoxContainer.new()
+	uh.add_theme_constant_override("separation", 10)
 	upd_card.add_child(uh)
 	upd_lbl = _label("", uh)
-	upd_lbl.size_flags_horizontal = SIZE_EXPAND_FILL
-	upd_lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	upd_btn = _button("Mettre à jour", uh)
-	upd_btn.theme_type_variation = "Tab"
-	upd_btn.toggle_mode = false
+	upd_lbl.add_theme_font_size_override("font_size", 13)
+	upd_lbl.add_theme_color_override("font_color", C_MUTED)
+	upd_btn = _button("", uh)
+	upd_btn.theme_type_variation = "Chip"
 	upd_btn.pressed.connect(_do_update)
-	var ml := _label("COMMENCER", home_box)
-	ml.add_theme_font_size_override("font_size", 12)
-	ml.add_theme_color_override("font_color", C_MUTED)
-	_mode_card(home_box, "Sans fil", "Host / clients sur le réseau local : PC, téléphones…", "~60–100 ms")
 	var foot := LinkButton.new()
-	foot.text = "v%s  ·  github.com/goodview-soft/sound-link" % VERSION
+	foot.text = "v%s · GitHub" % VERSION
 	foot.uri = "https://github.com/goodview-soft/sound-link"
 	foot.underline = LinkButton.UNDERLINE_MODE_ON_HOVER
-	foot.add_theme_color_override("font_color", C_MUTED)
+	foot.add_theme_color_override("font_color", Color(C_MUTED, 0.7))
 	foot.add_theme_color_override("font_hover_color", C_ACCENT2)
 	foot.add_theme_font_size_override("font_size", 12)
 	foot.size_flags_horizontal = SIZE_SHRINK_CENTER
 	home_box.add_child(foot)
 
-	root = app_box
-	var back_row := HBoxContainer.new()
-	root.add_child(back_row)
-	_button("‹  Accueil", back_row).pressed.connect(_go_home)
-	conn_lbl = _label("", back_row)
-	conn_lbl.size_flags_horizontal = SIZE_EXPAND_FILL
-	conn_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
-	conn_lbl.add_theme_color_override("font_color", C_ACCENT2)
+	# --- Pages
+	app_box = VBoxContainer.new()
+	app_box.add_theme_constant_override("separation", 16)
+	app_box.visible = false
+	root.add_child(app_box)
 
-	# --- Onglets segmentés
-	var seg := PanelContainer.new()
-	seg.add_theme_stylebox_override("panel", _sb(C_FIELD, 12, 4, 4, C_BORDER))
-	root.add_child(seg)
-	tabs_seg = seg
-	var tabs := HBoxContainer.new()
-	seg.add_child(tabs)
-	var group := ButtonGroup.new()
-	btn_host = _button("Host  ·  diffuser", tabs)
-	btn_client = _button("Client  ·  écouter", tabs)
-	for b in [btn_host, btn_client]:
-		b.toggle_mode = true
-		b.button_group = group
-		b.theme_type_variation = "Tab"
-		b.size_flags_horizontal = SIZE_EXPAND_FILL
-	btn_host.pressed.connect(_set_mode.bind("host"))
-	btn_client.pressed.connect(_set_mode.bind("client"))
-
-	# --- Host
+	# Diffuser (host)
 	host_box = VBoxContainer.new()
-	host_box.add_theme_constant_override("separation", 14)
-	root.add_child(host_box)
-	var hs := _card(host_box, "Source")
-	var src := OS.get_environment("PULSE_SOURCE")
-	_hint("« Default » = sortie son du PC." if src.ends_with(".monitor")
-		else "Pour envoyer la sortie son du PC, lancer via sound-link.sh puis garder « Default ».", hs)
+	host_box.add_theme_constant_override("separation", 16)
+	app_box.add_child(host_box)
+	var hs := _card(host_box)
 	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 8)
 	hs.add_child(row)
 	dev_opt = OptionButton.new()
 	dev_opt.size_flags_horizontal = SIZE_EXPAND_FILL
 	dev_opt.clip_text = true
 	row.add_child(dev_opt)
-	_button("↻", row).pressed.connect(_refresh_devices)
-	_slider_row(hs, "Gain d'envoi", 0, 200, host_gain * 100.0, func(x: float) -> String:
+	_icon_btn("refresh", row).pressed.connect(_refresh_devices)
+	_slider_line(hs, Icon.new("speaker", 22, C_MUTED), 0, 200, host_gain * 100.0, 100, func(x: float) -> String:
 		host_gain = x / 100.0
-		return "%d %%" % roundi(x))
-	host_btn = _button("", hs)
+		return "%d%%" % roundi(x))
+	host_btn = _round_btn(host_box)
 	host_btn.pressed.connect(func() -> void:
 		if running: _stop()
 		else: _start_host())
-	host_status = _hint("", hs)
-	var hc := _card(host_box, "Clients connectés")
-	vsink_lbl = _hint("", hc)
-	no_client_lbl = _hint("Aucun client pour l'instant.", hc)
-	no_client_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	clients_list = VBoxContainer.new()
-	clients_list.add_theme_constant_override("separation", 10)
-	hc.add_child(clients_list)
-	if not OS.has_feature("mobile"):
-		var qc := _card(host_box, "Installer sur un téléphone")
-		var qh := HBoxContainer.new()
-		qh.add_theme_constant_override("separation", 14)
-		qc.add_child(qh)
+	host_status = _caption(host_box)
+	ip_chip = _label("", host_box)
+	ip_chip.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	ip_chip.add_theme_color_override("font_color", C_ACCENT2)
+	ip_chip.add_theme_font_size_override("font_size", 18)
+	var hc := _card(host_box)
+	var ch := HBoxContainer.new()
+	hc.add_child(ch)
+	var ct := _label("Clients", ch)
+	ct.add_theme_font_size_override("font_size", 16)
+	ct.size_flags_horizontal = SIZE_EXPAND_FILL
+	var qr_btn := _icon_btn("qr", ch)
+	qr_btn.toggle_mode = true
+	qr_btn.tooltip_text = "Installer l'appli sur un téléphone"
+	var qr_box := VBoxContainer.new()
+	qr_box.visible = false
+	hc.add_child(qr_box)
+	if OS.has_feature("mobile"):
+		qr_btn.visible = false
+	else:
 		var qr := TextureRect.new()
 		qr.texture = load("res://qr_apk.svg")
 		qr.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
 		qr.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
 		qr.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
-		qr.custom_minimum_size = Vector2(132, 132)
-		qh.add_child(qr)
-		var qv := VBoxContainer.new()
-		qv.size_flags_horizontal = SIZE_EXPAND_FILL
-		qv.alignment = BoxContainer.ALIGNMENT_CENTER
-		qh.add_child(qv)
-		_label("Scanner avec le téléphone", qv)
-		_hint("Télécharge la dernière version de l'appli Android. Autoriser l'installation si Android le demande, puis choisir Sans fil : l'IP de ce PC est détectée toute seule.", qv)
+		qr.custom_minimum_size = Vector2(170, 170)
+		qr_box.add_child(qr)
+		_caption(qr_box).text = "Scanner pour installer l'appli Android"
+	qr_btn.toggled.connect(func(on: bool) -> void: qr_box.visible = on)
+	vsink_lbl = _hint("", hc)
+	no_client_lbl = _caption(hc)
+	no_client_lbl.text = "Aucun client"
+	clients_list = VBoxContainer.new()
+	clients_list.add_theme_constant_override("separation", 10)
+	hc.add_child(clients_list)
 
-	# --- Client
+	# Écouter (client)
 	client_box = VBoxContainer.new()
-	client_box.add_theme_constant_override("separation", 14)
-	root.add_child(client_box)
-	var cc := _card(client_box, "Connexion")
+	client_box.add_theme_constant_override("separation", 16)
+	app_box.add_child(client_box)
+	var cc := _card(client_box)
 	ip_edit = LineEdit.new()
-	ip_edit.placeholder_text = "IP du host  (192.168.1.x)"
+	ip_edit.placeholder_text = "IP du host"
 	ip_edit.text = cfg.get_value("client", "ip", "")
 	cc.add_child(ip_edit)
 	name_edit = LineEdit.new()
 	name_edit.text = cfg.get_value("client", "name", OS.get_model_name() if OS.get_name() == "Android" else "")
-	name_edit.placeholder_text = "Mon nom  (ex. Téléphone)"
+	name_edit.placeholder_text = "Mon nom"
 	cc.add_child(name_edit)
-	client_btn = _button("", cc)
+	found_lbl = _hint("", cc)
+	client_btn = _round_btn(client_box)
 	client_btn.pressed.connect(func() -> void:
 		if running: _stop()
 		else: _start_client())
 	ip_edit.text_submitted.connect(func(_t: String) -> void:
 		if not running: _start_client())
-	found_lbl = _hint("", cc)
-	client_status = _hint("", cc)
+	client_status = _caption(client_box)
 
-	var ce := _card(client_box, "Écoute")
-	_slider_row(ce, "Volume", 0, 150, volume * 100.0, func(x: float) -> String:
+	var ce := _card(client_box)
+	var mute_btn := _icon_btn("speaker", null)
+	mute_btn.toggle_mode = true
+	mute_btn.tooltip_text = "Muet"
+	mute_btn.toggled.connect(func(on: bool) -> void:
+		muted = on
+		mute_btn.get_meta("icon").set_kind("speaker_off" if on else "speaker"))
+	_slider_line(ce, mute_btn, 0, 150, volume * 100.0, 100, func(x: float) -> String:
 		volume = x / 100.0
-		return "%d %%" % roundi(x))
-	bal_slider = _slider_row(ce, "Balance", -100, 100, balance * 100.0, func(x: float) -> String:
+		return "%d%%" % roundi(x))
+	var bl := Label.new()
+	bl.text = "G  D"
+	bl.add_theme_color_override("font_color", C_MUTED)
+	bl.custom_minimum_size.x = 40
+	bl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	bal_slider = _slider_line(ce, bl, -100, 100, balance * 100.0, 0, func(x: float) -> String:
 		balance = x / 100.0
-		return "centre" if absf(x) < 1 else "%s %d %%" % ["D" if x > 0 else "G", roundi(absf(x))])
-	var brow := HBoxContainer.new()
-	ce.add_child(brow)
-	var mute := CheckButton.new()
-	mute.text = "Muet"
-	mute.size_flags_horizontal = SIZE_EXPAND_FILL
-	mute.toggled.connect(func(on: bool) -> void: muted = on)
-	brow.add_child(mute)
-	_button("Centrer", brow).pressed.connect(func() -> void: bal_slider.value = 0)
+		return "centre" if absf(x) < 1 else "%s %d" % ["D" if x > 0 else "G", roundi(absf(x))])
 
-	var cm := _card(client_box, "Micro")
-	var mic_chk := CheckButton.new()
-	mic_chk.text = "Servir de micro au PC"
-	mic_chk.button_pressed = send_mic
-	mic_chk.toggled.connect(func(on: bool) -> void:
+	var cm := _card(client_box)
+	var mrow := HBoxContainer.new()
+	mrow.add_theme_constant_override("separation", 10)
+	cm.add_child(mrow)
+	var mic_btn := _icon_btn("mic" if send_mic else "mic_off", mrow)
+	mic_btn.toggle_mode = true
+	mic_btn.button_pressed = send_mic
+	var mlab := _label("Micro vers le PC", mrow)
+	mlab.size_flags_horizontal = SIZE_EXPAND_FILL
+	mic_box = VBoxContainer.new()
+	mic_box.visible = send_mic
+	mic_box.add_theme_constant_override("separation", 8)
+	cm.add_child(mic_box)
+	_slider_line(mic_box, Icon.new("mic", 22, C_MUTED), 0, 300, mic_gain * 100.0, 100, func(x: float) -> String:
+		mic_gain = x / 100.0
+		return "%d%%" % roundi(x))
+	mic_box.add_child(Spectrum.new("Capture", 48.0))
+	mic_btn.toggled.connect(func(on: bool) -> void:
 		send_mic = on
+		mic_btn.get_meta("icon").set_kind("mic" if on else "mic_off")
 		mic_box.visible = on
 		if running:
 			if on: _start_capture("Default")
 			else: _stop_capture())
-	cm.add_child(mic_chk)
-	mic_box = VBoxContainer.new()
-	mic_box.visible = send_mic
-	mic_box.add_theme_constant_override("separation", 10)
-	cm.add_child(mic_box)
-	_slider_row(mic_box, "Gain micro", 0, 300, mic_gain * 100.0, func(x: float) -> String:
-		mic_gain = x / 100.0
-		return "%d %%" % roundi(x))
-	mic_box.add_child(Spectrum.new("Capture", 56.0))
-	_hint("Son du PC dans le haut-parleur ? Casque ou « Muet » pour éviter l'écho.", mic_box)
 
-	# --- Niveau
-	var lv := _card(root, "Niveau  L / R")
 	meter = LevelMeter.new()
-	lv.add_child(meter)
+	app_box.add_child(meter)
 	_set_run_btn(host_btn, false)
 	_set_run_btn(client_btn, false)
 
@@ -659,6 +698,27 @@ func _make_theme() -> Theme:
 	t.set_stylebox("hover", "ModeCard", _sb(Color("#1d2130"), 14, 16, 14, C_ACCENT))
 	t.set_stylebox("pressed", "ModeCard", _sb(Color("#241f45"), 14, 16, 14, C_ACCENT))
 	t.set_stylebox("hover_pressed", "ModeCard", _sb(Color("#241f45"), 14, 16, 14, C_ACCENT))
+
+	t.set_type_variation("IconBtn", "Button")
+	t.set_stylebox("normal", "IconBtn", _sb(Color("#1d2130"), 12, 0, 0))
+	t.set_stylebox("hover", "IconBtn", _sb(Color("#272c3c"), 12, 0, 0))
+	t.set_stylebox("pressed", "IconBtn", _sb(C_ACCENT, 12, 0, 0))
+	t.set_stylebox("hover_pressed", "IconBtn", _sb(C_ACCENT.lightened(0.08), 12, 0, 0))
+	t.set_type_variation("Round", "Button")
+	t.set_stylebox("normal", "Round", _sb(C_ACCENT, 40, 0, 0))
+	t.set_stylebox("hover", "Round", _sb(C_ACCENT.lightened(0.1), 40, 0, 0))
+	t.set_stylebox("pressed", "Round", _sb(C_ACCENT.darkened(0.15), 40, 0, 0))
+	t.set_type_variation("RoundOn", "Button")
+	t.set_stylebox("normal", "RoundOn", _sb(Color("#3a1f26"), 40, 0, 0, C_DANGER))
+	t.set_stylebox("hover", "RoundOn", _sb(Color("#4a2430"), 40, 0, 0, C_DANGER))
+	t.set_stylebox("pressed", "RoundOn", _sb(Color("#2c171c"), 40, 0, 0, C_DANGER))
+	t.set_type_variation("Chip", "Button")
+	t.set_stylebox("normal", "Chip", _sb(Color(C_ACCENT2, 0.10), 10, 9, 3))
+	t.set_stylebox("hover", "Chip", _sb(Color(C_ACCENT2, 0.2), 10, 9, 3))
+	t.set_stylebox("pressed", "Chip", _sb(Color(C_ACCENT2, 0.3), 10, 9, 3))
+	for k in ["font_color", "font_hover_color", "font_pressed_color"]:
+		t.set_color(k, "Chip", C_ACCENT2)
+	t.set_font_size("font_size", "Chip", 13)
 
 	# Champs texte
 	t.set_stylebox("normal", "LineEdit", _sb(C_FIELD, 9, 12, 10, C_BORDER))
@@ -765,29 +825,87 @@ func _slider(mn: float, mx: float, val: float, parent: Node) -> HSlider:
 
 
 ## Ligne « titre ........ valeur » + curseur ; fmt applique la valeur et renvoie son texte.
-func _slider_row(parent: Node, title: String, mn: float, mx: float, val: float, fmt: Callable) -> HSlider:
-	var box := VBoxContainer.new()
-	box.add_theme_constant_override("separation", 2)
-	parent.add_child(box)
+## Ligne compacte : [élément de tête] [curseur] [valeur cliquable = réinitialiser].
+func _slider_line(parent: Node, lead: Control, mn: float, mx: float, val: float, reset: float, fmt: Callable) -> HSlider:
 	var row := HBoxContainer.new()
-	box.add_child(row)
-	var l := _label(title, row)
-	l.size_flags_horizontal = SIZE_EXPAND_FILL
-	l.add_theme_color_override("font_color", C_MUTED)
-	var vl := _label("", row)
-	vl.add_theme_color_override("font_color", C_ACCENT2)
-	var s := _slider(mn, mx, val, box)
-	s.value_changed.connect(func(x: float) -> void: vl.text = fmt.call(x))
-	vl.text = fmt.call(val)
+	row.add_theme_constant_override("separation", 10)
+	parent.add_child(row)
+	row.add_child(lead)
+	var s := _slider(mn, mx, val, row)
+	s.size_flags_horizontal = SIZE_EXPAND_FILL
+	s.size_flags_vertical = SIZE_SHRINK_CENTER
+	var vb := _button("", row)
+	vb.theme_type_variation = "Chip"
+	vb.custom_minimum_size.x = 64
+	vb.tooltip_text = "Réinitialiser"
+	vb.pressed.connect(func() -> void: s.value = reset)
+	s.value_changed.connect(func(x: float) -> void: vb.text = fmt.call(x))
+	vb.text = fmt.call(val)
 	return s
 
 
+func _icon_btn(kind: String, parent: Node, sz := 40.0) -> Button:
+	var b := Button.new()
+	b.theme_type_variation = "IconBtn"
+	b.custom_minimum_size = Vector2(sz, sz)
+	b.size_flags_vertical = SIZE_SHRINK_CENTER
+	var ic := Icon.new(kind, 0)
+	ic.scale_f = 0.55
+	ic.set_anchors_preset(PRESET_FULL_RECT)
+	b.add_child(ic)
+	b.set_meta("icon", ic)
+	if parent:
+		parent.add_child(b)
+	return b
+
+
+func _round_btn(parent: Node) -> Button:
+	var cc := CenterContainer.new()
+	parent.add_child(cc)
+	var b := Button.new()
+	b.custom_minimum_size = Vector2(80, 80)
+	cc.add_child(b)
+	var ic := Icon.new("play", 0, Color.WHITE)
+	ic.scale_f = 0.42
+	ic.set_anchors_preset(PRESET_FULL_RECT)
+	b.add_child(ic)
+	b.set_meta("icon", ic)
+	return b
+
+
+func _caption(parent: Node) -> Label:
+	var l := _label("", parent)
+	l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	l.add_theme_color_override("font_color", C_MUTED)
+	l.add_theme_font_size_override("font_size", 13)
+	return l
+
+
+func _tile(parent: Node, kind: String, title: String, m: String) -> void:
+	var b := Button.new()
+	b.theme_type_variation = "ModeCard"
+	b.custom_minimum_size.y = 148
+	b.size_flags_horizontal = SIZE_EXPAND_FILL
+	parent.add_child(b)
+	var v := VBoxContainer.new()
+	v.set_anchors_preset(PRESET_FULL_RECT)
+	v.alignment = BoxContainer.ALIGNMENT_CENTER
+	v.mouse_filter = MOUSE_FILTER_IGNORE
+	v.add_theme_constant_override("separation", 12)
+	b.add_child(v)
+	var ic := Icon.new(kind, 46, C_ACCENT2)
+	ic.size_flags_horizontal = SIZE_SHRINK_CENTER
+	v.add_child(ic)
+	var l := _label(title, v)
+	l.add_theme_font_size_override("font_size", 18)
+	l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	b.pressed.connect(_open.bind(m))
+
+
 func _set_run_btn(b: Button, on: bool) -> void:
-	b.theme_type_variation = "Danger" if on else "Primary"
-	if b == host_btn:
-		b.text = "■  Arrêter la diffusion" if on else "▶  Démarrer la diffusion"
-	else:
-		b.text = "■  Se déconnecter" if on else "▶  Se connecter"
+	b.theme_type_variation = "RoundOn" if on else "Round"
+	b.get_meta("icon").set_kind("stop" if on else "play", C_DANGER if on else Color.WHITE)
+	b.tooltip_text = ("Arrêter" if on else "Démarrer") if b == host_btn else ("Se déconnecter" if on else "Se connecter")
 
 
 func _set_mode(m: String) -> void:
@@ -796,8 +914,6 @@ func _set_mode(m: String) -> void:
 	mode = m
 	host_box.visible = m == "host"
 	client_box.visible = m == "client"
-	btn_host.set_pressed_no_signal(m == "host")
-	btn_client.set_pressed_no_signal(m == "client")
 	if m == "host":
 		_refresh_devices()
 
@@ -874,8 +990,7 @@ func _start_host() -> void:
 	vsink_ok = VSINK in AudioServer.get_output_device_list()
 	if vsink_ok:
 		AudioServer.output_device = VSINK
-	vsink_lbl.text = ("Micros reçus → micro virtuel « Sound-Link-Micro » (à choisir dans Discord, OBS…)." if vsink_ok
-		else "Micro virtuel absent : lancer via sound-link.sh pour utiliser les micros des clients (spectre seul).")
+	vsink_lbl.text = "Micros → « Sound-Link-Micro »" if vsink_ok else "Micro virtuel absent : lancer via sound-link.sh"
 	seq = 0
 	running = true
 	_set_run_btn(host_btn, true)
@@ -936,26 +1051,26 @@ func _add_client(key: String, ip: String, port: int, cname: String, now: float) 
 	v.add_theme_constant_override("separation", 8)
 	panel.add_child(v)
 	var top := HBoxContainer.new()
+	top.add_theme_constant_override("separation", 8)
 	v.add_child(top)
 	var dot := _label("●", top)
 	var nm := _label(cname if cname != "" else ip, top)
-	nm.add_theme_font_size_override("font_size", 16)
+	nm.add_theme_font_size_override("font_size", 15)
 	nm.size_flags_horizontal = SIZE_EXPAND_FILL
 	nm.clip_text = true
 	nm.tooltip_text = key
 	var info := _hint("", top)
 	info.autowrap_mode = TextServer.AUTOWRAP_OFF
-	var mb := _button("Micro on", top)
+	var mb := _icon_btn("mic", top, 34)
 	mb.toggle_mode = true
-	mb.add_theme_font_size_override("font_size", 13)
+	mb.tooltip_text = "Couper ce micro"
 	mb.toggled.connect(func(off: bool) -> void:
 		c["muted"] = off
-		mb.text = "Micro off" if off else "Micro on")
-	v.add_child(Spectrum.new(bus, 52.0))
-	var vs := _slider(0, 200, 100, v)
-	vs.tooltip_text = "Volume de ce micro"
-	vs.value_changed.connect(func(x: float) -> void: AudioServer.set_bus_volume_db(
-		AudioServer.get_bus_index(bus), linear_to_db(maxf(x / 100.0, 0.0001))))
+		mb.get_meta("icon").set_kind("mic_off" if off else "mic"))
+	v.add_child(Spectrum.new(bus, 40.0))
+	_slider_line(v, Icon.new("speaker", 20, C_MUTED), 0, 200, 100, 100, func(x: float) -> String:
+		AudioServer.set_bus_volume_db(AudioServer.get_bus_index(bus), linear_to_db(maxf(x / 100.0, 0.0001)))
+		return "%d%%" % roundi(x))
 
 	c["panel"] = panel
 	c["name"] = nm
@@ -1093,20 +1208,22 @@ func _client_process(now: float, delta: float) -> Vector2:
 func _update_status(now: float) -> void:
 	var live := running and (mode == "host" or now - rx.last_rx < 2.0)
 	pill_dot.add_theme_color_override("font_color", C_OK if live else (Color("#fbbf24") if running else C_MUTED))
-	pill_txt.text = ("En diffusion" if mode == "host" else "Connecté") if live else ("Connexion…" if running else "Arrêté")
+	pill_txt.text = ("En direct" if mode == "host" else "Connecté") if live else ("Recherche…" if running else "Arrêté")
 	no_client_lbl.visible = clients.is_empty()
 	if mode == "host":
-		if not running:
-			host_status.text = "Arrêté. IP de ce PC : %s" % _local_ips()
-			vsink_lbl.text = ""
+		ip_chip.text = _local_ips()
+		if running:
+			var n := clients.size()
+			host_status.text = "%d client%s" % [n, "s" if n > 1 else ""]
 		else:
-			host_status.text = "Diffusion sur le port %d — IP de ce PC : %s\nClients connectés : %d" % [PORT, _local_ips(), clients.size()]
+			host_status.text = "Prêt à diffuser"
+			vsink_lbl.text = ""
 	elif not running:
-		client_status.text = "Déconnecté."
+		client_status.text = "Déconnecté"
 	elif now - rx.last_rx > 2.0:
-		client_status.text = "En attente du host… (vérifier l'IP, le pare-feu UDP %d)" % PORT
+		client_status.text = "Recherche du host…"
 	else:
-		client_status.text = "Réception OK — %d Hz — tampon ~%d ms — paquets perdus : %d" % [rx.rate, rx.latency_ms(), rx.lost]
+		client_status.text = "%d ms · %d perdus" % [rx.latency_ms(), rx.lost]
 
 
 func _local_ips() -> String:
@@ -1125,7 +1242,7 @@ func _check_update() -> void:
 		upd_http.timeout = 10.0
 		add_child(upd_http)
 	upd_http.cancel_request()
-	upd_lbl.text = "Recherche de mises à jour…"
+	upd_lbl.text = "Recherche…"
 	upd_btn.visible = false
 	upd_http.request_completed.connect(_on_version_json, CONNECT_ONE_SHOT)
 	upd_http.request(UPDATE_URL)
@@ -1135,14 +1252,13 @@ func _on_version_json(result: int, code: int, _h: PackedStringArray, body: Packe
 	upd_btn.text = "Vérifier"
 	upd_btn.visible = true
 	if result != HTTPRequest.RESULT_SUCCESS or code != 200:
-		upd_lbl.text = ("✓  v%s (aucune version publiée)" % VERSION) if code == 404 \
-			else "Mises à jour : vérification impossible (hors ligne ?)."
+		upd_lbl.text = "✓ À jour" if code == 404 else "Hors ligne"
 		return
 	var info = JSON.parse_string(body.get_string_from_utf8())
 	if not (info is Dictionary) or not info.has("version"):
 		return
 	if not preload("res://boot.gd").newer(str(info["version"]), VERSION):
-		upd_lbl.text = "✓  À jour (v%s)" % VERSION
+		upd_lbl.text = "✓ À jour"
 		return
 	upd_info = info
 	upd_btn.visible = true
@@ -1150,16 +1266,19 @@ func _on_version_json(result: int, code: int, _h: PackedStringArray, body: Packe
 	var same_engine: bool = str(info.get("godot", "")) == "%d.%d.%d" % [Engine.get_version_info().major,
 		Engine.get_version_info().minor, Engine.get_version_info().patch]
 	if same_engine and info.has("pck"):
-		upd_lbl.text = "Version %s disponible." % info["version"]
+		upd_lbl.text = "v%s disponible" % info["version"]
 		upd_btn.text = "Mettre à jour"
 	else:
-		upd_lbl.text = "Version %s disponible (nouveau programme à télécharger)." % info["version"]
+		upd_lbl.text = "v%s disponible" % info["version"]
 		upd_btn.text = "Télécharger"
 
 
 func _do_update() -> void:
 	if upd_btn.text == "Vérifier":
 		_check_update()
+	for arg in OS.get_cmdline_user_args():  # ex. -- --page=host
+		if arg in ["--page=host", "--page=client"]:
+			_open(arg.substr(7))
 		return
 	if upd_btn.text == "Télécharger":
 		OS.shell_open(RELEASES_URL)
@@ -1198,53 +1317,9 @@ func _on_pck(result: int, code: int, _h: PackedStringArray, _b: PackedByteArray)
 
 # ---------------------------------------------------------------- Accueil / modes
 
-func _mode_card(parent: Node, title: String, desc: String, badge: String) -> void:
-	var b := Button.new()
-	b.theme_type_variation = "ModeCard"
-	b.custom_minimum_size.y = 96
-	parent.add_child(b)
-	var m := MarginContainer.new()
-	m.set_anchors_preset(PRESET_FULL_RECT)
-	m.mouse_filter = MOUSE_FILTER_IGNORE
-	for side in ["left", "right", "top", "bottom"]:
-		m.add_theme_constant_override("margin_" + side, 16)
-	b.add_child(m)
-	var h := HBoxContainer.new()
-	h.mouse_filter = MOUSE_FILTER_IGNORE
-	h.add_theme_constant_override("separation", 14)
-	m.add_child(h)
-	var ic := ModeIcon.new()
-	h.add_child(ic)
-	var v := VBoxContainer.new()
-	v.mouse_filter = MOUSE_FILTER_IGNORE
-	v.size_flags_horizontal = SIZE_EXPAND_FILL
-	v.alignment = BoxContainer.ALIGNMENT_CENTER
-	v.add_theme_constant_override("separation", 2)
-	h.add_child(v)
-	var tr := HBoxContainer.new()
-	tr.mouse_filter = MOUSE_FILTER_IGNORE
-	v.add_child(tr)
-	var t := _label(title, tr)
-	t.add_theme_font_size_override("font_size", 19)
-	t.size_flags_horizontal = SIZE_EXPAND_FILL
-	var bp := PanelContainer.new()
-	bp.mouse_filter = MOUSE_FILTER_IGNORE
-	bp.add_theme_stylebox_override("panel", _sb(Color(C_ACCENT2, 0.12), 10, 8, 2))
-	tr.add_child(bp)
-	var bl := _label(badge, bp)
-	bl.add_theme_font_size_override("font_size", 12)
-	bl.add_theme_color_override("font_color", C_ACCENT2)
-	_hint(desc, v)
-	var arrow := _label("›", h)
-	arrow.add_theme_font_size_override("font_size", 26)
-	arrow.add_theme_color_override("font_color", C_MUTED)
-	b.mouse_entered.connect(func() -> void: ic.hover = true)
-	b.mouse_exited.connect(func() -> void: ic.hover = false)
-	b.pressed.connect(_enter_app)
-
-
-func _enter_app() -> void:
-	conn_lbl.text = "Mode sans fil"
+func _open(m: String) -> void:
+	_set_mode(m)
+	conn_lbl.text = "Diffuser" if m == "host" else "Écouter"
 	home_box.visible = false
 	head_box.visible = true
 	app_box.visible = true
