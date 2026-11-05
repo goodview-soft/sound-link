@@ -14,6 +14,8 @@ const MIC_TAG := "MIC1"
 const VSINK := "soundlink_sink"
 const VERSION: String = preload("res://version.gd").VERSION
 const UPDATE_URL := "https://github.com/goodview-soft/sound-link/releases/latest/download/version.json"
+const DISC_PORT := 4243
+const BEACON := "SOUNDLINK1"
 const RELEASES_URL := "https://github.com/goodview-soft/sound-link/releases/latest"
 
 var udp := PacketPeerUDP.new()
@@ -76,6 +78,14 @@ var meter: LevelMeter
 var pill_dot: Label
 var pill_txt: Label
 var upd_card: PanelContainer
+var home_box: VBoxContainer
+var app_box: VBoxContainer
+var conn_lbl: Label
+var usb_hint: Label
+var found_lbl: Label
+var low_latency := false
+var disc := PacketPeerUDP.new()
+var beacon_t := 0.0
 var upd_lbl: Label
 var upd_btn: Button
 var upd_http: HTTPRequest
@@ -95,6 +105,8 @@ class RxStream:
 	var last_seq := -1
 	var lost := 0
 	var last_rx := -100.0
+	var prebuffer := 4
+	var max_queue := 8
 	var stereo: bool
 	var hdr: int
 	var parent: Node
@@ -120,7 +132,7 @@ class RxStream:
 		if r != rate:
 			_setup(r)
 		queue.append(pkt)
-		while queue.size() > 8:
+		while queue.size() > max_queue:
 			queue.pop_front()  # dérive d'horloge : on garde la latence basse
 
 	## Pousse l'audio dans le générateur, renvoie les crêtes (L, R).
@@ -131,7 +143,7 @@ class RxStream:
 			skips = playback.get_skips()
 			buffering = true
 		if buffering:
-			if queue.size() < 4:
+			if queue.size() < prebuffer:
 				return Vector2.ZERO
 			buffering = false
 		var step := 4 if stereo else 2
@@ -346,11 +358,18 @@ func _build_ui() -> void:
 	pill_txt = _label("", ph)
 	pill_txt.add_theme_font_size_override("font_size", 13)
 
-	# --- Bandeau de mise à jour (caché tant qu'il n'y a rien)
+	home_box = VBoxContainer.new()
+	home_box.add_theme_constant_override("separation", 14)
+	root.add_child(home_box)
+	app_box = VBoxContainer.new()
+	app_box.add_theme_constant_override("separation", 14)
+	app_box.visible = false
+	root.add_child(app_box)
+
+	# --- Accueil : mises à jour + choix du mode
 	upd_card = PanelContainer.new()
 	upd_card.add_theme_stylebox_override("panel", _sb(Color("#1e1a3a"), 12, 14, 10, C_ACCENT))
-	upd_card.visible = false
-	root.add_child(upd_card)
+	home_box.add_child(upd_card)
 	var uh := HBoxContainer.new()
 	upd_card.add_child(uh)
 	upd_lbl = _label("", uh)
@@ -360,6 +379,23 @@ func _build_ui() -> void:
 	upd_btn.theme_type_variation = "Tab"
 	upd_btn.toggle_mode = false
 	upd_btn.pressed.connect(_do_update)
+	upd_btn.visible = false
+	upd_lbl.text = "Recherche de mises à jour…"
+	var ml := _label("CHOISIR UN MODE", home_box)
+	ml.add_theme_font_size_override("font_size", 12)
+	ml.add_theme_color_override("font_color", C_MUTED)
+	_mode_card(home_box, "Sans fil", "Wi-Fi / réseau local. Le plus simple. Latence ~60 à 100 ms.", false)
+	_mode_card(home_box, "USB", "Téléphone branché au PC avec le partage de connexion USB activé. Latence plus basse et stable (~30 à 50 ms), pas de coupures Wi-Fi.", true)
+
+	root = app_box
+	var back_row := HBoxContainer.new()
+	root.add_child(back_row)
+	_button("‹  Accueil", back_row).pressed.connect(_go_home)
+	conn_lbl = _label("", back_row)
+	conn_lbl.size_flags_horizontal = SIZE_EXPAND_FILL
+	conn_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	conn_lbl.add_theme_color_override("font_color", C_ACCENT2)
+	usb_hint = _hint("USB : brancher le téléphone au PC, puis sur le téléphone : Paramètres → Réseau → Partage de connexion → Partage via USB. Lancer le host sur le PC : son IP est détectée toute seule.", root)
 
 	# --- Onglets segmentés
 	var seg := PanelContainer.new()
@@ -428,6 +464,7 @@ func _build_ui() -> void:
 		else: _start_client())
 	ip_edit.text_submitted.connect(func(_t: String) -> void:
 		if not running: _start_client())
+	found_lbl = _hint("", cc)
 	client_status = _hint("", cc)
 
 	var ce := _card(client_box, "Écoute")
@@ -521,6 +558,13 @@ func _make_theme() -> Theme:
 	t.set_color("font_color", "Danger", C_DANGER)
 	t.set_color("font_hover_color", "Danger", Color("#fecaca"))
 	t.set_font_size("font_size", "Danger", 16)
+
+	# Cartes de mode (accueil)
+	t.set_type_variation("ModeCard", "Button")
+	t.set_stylebox("normal", "ModeCard", _sb(C_CARD, 14, 16, 14, C_BORDER))
+	t.set_stylebox("hover", "ModeCard", _sb(Color("#1d2130"), 14, 16, 14, C_ACCENT))
+	t.set_stylebox("pressed", "ModeCard", _sb(Color("#241f45"), 14, 16, 14, C_ACCENT))
+	t.set_stylebox("hover_pressed", "ModeCard", _sb(Color("#241f45"), 14, 16, 14, C_ACCENT))
 
 	# Champs texte
 	t.set_stylebox("normal", "LineEdit", _sb(C_FIELD, 9, 12, 10, C_BORDER))
@@ -755,6 +799,7 @@ func _start_client() -> void:
 		return
 	udp.set_dest_address(ip, PORT)
 	rx = RxStream.new(self, true, 0)
+	_tune(rx)
 	running = true
 	hello_t = 0.0
 	mic_seq = 0
@@ -848,6 +893,7 @@ func _process(delta: float) -> void:
 	level_l = maxf(level_l * 0.88, peaks.x)
 	level_r = maxf(level_r * 0.88, peaks.y)
 	meter.set_levels(sqrt(level_l), sqrt(level_r))
+	_discovery(now, delta)
 	_update_status(now)
 
 
@@ -862,6 +908,7 @@ func _host_process(now: float) -> Vector2:
 			c["t"] = now
 			if c["rx"] == null:
 				c["rx"] = RxStream.new(self, false, 4, c["bus"])
+				_tune(c["rx"])
 			c["rx"].receive(pkt, now)
 			continue
 		var msg := pkt.get_string_from_ascii()
@@ -990,14 +1037,17 @@ func _check_update() -> void:
 
 func _on_version_json(result: int, code: int, _h: PackedStringArray, body: PackedByteArray) -> void:
 	if result != HTTPRequest.RESULT_SUCCESS or code != 200:
-		return  # hors ligne ou pas encore de release : on se tait
+		upd_lbl.text = ("✓  v%s (aucune version publiée)" % VERSION) if code == 404 \
+			else "Mises à jour : vérification impossible (hors ligne ?)."
+		return
 	var info = JSON.parse_string(body.get_string_from_utf8())
 	if not (info is Dictionary) or not info.has("version"):
 		return
 	if not preload("res://boot.gd").newer(str(info["version"]), VERSION):
+		upd_lbl.text = "✓  À jour (v%s)" % VERSION
 		return
 	upd_info = info
-	upd_card.visible = true
+	upd_btn.visible = true
 	var same_engine: bool = str(info.get("godot", "")) == "%d.%d.%d" % [Engine.get_version_info().major,
 		Engine.get_version_info().minor, Engine.get_version_info().patch]
 	if same_engine and info.has("pck"):
@@ -1042,3 +1092,84 @@ func _on_pck(result: int, code: int, _h: PackedStringArray, _b: PackedByteArray)
 	else:
 		upd_lbl.text = "Mise à jour %s installée : fermer puis rouvrir l'appli." % upd_info["version"]
 		upd_btn.visible = false
+
+
+# ---------------------------------------------------------------- Accueil / modes
+
+func _mode_card(parent: Node, title: String, desc: String, usb: bool) -> void:
+	var b := Button.new()
+	b.theme_type_variation = "ModeCard"
+	b.custom_minimum_size.y = 108
+	parent.add_child(b)
+	var m := MarginContainer.new()
+	m.set_anchors_preset(PRESET_FULL_RECT)
+	m.mouse_filter = MOUSE_FILTER_IGNORE
+	for side in ["left", "right", "top", "bottom"]:
+		m.add_theme_constant_override("margin_" + side, 16)
+	b.add_child(m)
+	var v := VBoxContainer.new()
+	v.mouse_filter = MOUSE_FILTER_IGNORE
+	m.add_child(v)
+	var t := _label(title + "  ›", v)
+	t.add_theme_font_size_override("font_size", 20)
+	_hint(desc, v)
+	b.pressed.connect(_enter_app.bind(usb))
+
+
+func _enter_app(usb: bool) -> void:
+	low_latency = usb
+	cfg.set_value("app", "usb", usb)
+	conn_lbl.text = "Mode USB · faible latence" if usb else "Mode sans fil"
+	usb_hint.visible = usb
+	home_box.visible = false
+	app_box.visible = true
+
+
+func _go_home() -> void:
+	if running:
+		_stop()
+	app_box.visible = false
+	home_box.visible = true
+
+
+func _tune(r: RxStream) -> void:
+	r.prebuffer = 2 if low_latency else 4
+	r.max_queue = 5 if low_latency else 8
+
+
+# ---------------------------------------------------------------- Découverte du host
+
+## Le host annonce sa présence en broadcast ; le client écoute et remplit l'IP tout seul.
+func _discovery(now: float, delta: float) -> void:
+	if mode == "host" and running:
+		beacon_t -= delta
+		if beacon_t <= 0.0:
+			beacon_t = 1.0
+			udp.set_broadcast_enabled(true)
+			for b in _broadcast_addrs():
+				udp.set_dest_address(b, DISC_PORT)
+				udp.put_packet(BEACON.to_ascii_buffer())
+		return
+	if mode != "client" or not app_box.visible:
+		if disc.is_bound():
+			disc.close()
+		return
+	if not disc.is_bound() and disc.bind(DISC_PORT) != OK:
+		return
+	while disc.get_available_packet_count() > 0:
+		var msg := disc.get_packet().get_string_from_ascii()
+		var ip := disc.get_packet_ip()
+		if msg != BEACON:
+			continue
+		found_lbl.text = "Host détecté : %s" % ip
+		found_lbl.add_theme_color_override("font_color", C_OK)
+		if not running and ip_edit.text.strip_edges() != ip and (low_latency or ip_edit.text.strip_edges() == ""):
+			ip_edit.text = ip
+
+
+func _broadcast_addrs() -> PackedStringArray:
+	var out: PackedStringArray = ["255.255.255.255"]
+	for a in IP.get_local_addresses():
+		if a.contains(".") and not a.begins_with("127.") and not a.begins_with("169.254"):
+			out.append(a.substr(0, a.rfind(".")) + ".255")
+	return out
