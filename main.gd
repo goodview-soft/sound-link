@@ -79,6 +79,8 @@ var pill_dot: Label
 var pill_txt: Label
 var upd_card: PanelContainer
 var home_box: VBoxContainer
+var head_box: HBoxContainer
+var tabs_seg: PanelContainer
 var app_box: VBoxContainer
 var conn_lbl: Label
 var usb_hint: Label
@@ -256,6 +258,69 @@ class Spectrum extends Control:
 		return s
 
 
+class HeroWave extends Control:
+	## Onde décorative animée sous le titre.
+	const N := 36
+	var t := 0.0
+
+	func _init() -> void:
+		custom_minimum_size.y = 46
+		size_flags_horizontal = SIZE_EXPAND_FILL
+
+	func _process(d: float) -> void:
+		if is_visible_in_tree():
+			t += d
+			queue_redraw()
+
+	func _draw() -> void:
+		var w := size.x / N
+		var mid := size.y / 2.0
+		for i in N:
+			var x := float(i) / (N - 1)
+			var env := sin(x * PI)  # plus haut au centre
+			var a := 0.5 + 0.5 * sin(t * 2.2 + i * 0.45) * cos(t * 1.3 - i * 0.21)
+			var h := maxf(3.0, env * a * (size.y - 4))
+			var c := Color("#22d3ee").lerp(Color("#7c6cff"), x)
+			draw_rect(Rect2(i * w + w * 0.25, mid - h / 2, w * 0.5, h), Color(c, 0.35 + 0.5 * env))
+
+
+class ModeIcon extends Control:
+	## Pastille ronde avec un pictogramme Wi-Fi ou USB dessiné.
+	var usb := false
+	var hover := false:
+		set(v):
+			hover = v
+			queue_redraw()
+
+	func _init(is_usb: bool) -> void:
+		usb = is_usb
+		custom_minimum_size = Vector2(52, 52)
+		size_flags_vertical = SIZE_SHRINK_CENTER
+		mouse_filter = MOUSE_FILTER_IGNORE
+
+	func _draw() -> void:
+		var c := size / 2.0
+		var acc := Color("#7c6cff")
+		draw_circle(c, 26, Color(acc, 0.28 if hover else 0.16))
+		draw_arc(c, 25.5, 0, TAU, 48, Color(acc, 0.7), 1.5, true)
+		var fg := Color("#e7eaf0")
+		if not usb:
+			var o := c + Vector2(0, 8)
+			for r in [7.0, 13.0, 19.0]:
+				draw_arc(o, r, deg_to_rad(-135), deg_to_rad(-45), 20, fg, 2.5, true)
+			draw_circle(o, 2.6, fg)
+		else:
+			var top := c + Vector2(0, -15)
+			var bot := c + Vector2(0, 13)
+			draw_line(top + Vector2(0, 5), bot, fg, 2.5, true)
+			draw_colored_polygon(PackedVector2Array([top, top + Vector2(-5, 7), top + Vector2(5, 7)]), fg)
+			draw_polyline(PackedVector2Array([c + Vector2(0, 7), c + Vector2(-9, 0), c + Vector2(-9, -5)]), fg, 2.2, true)
+			draw_circle(c + Vector2(-9, -7), 3, fg)
+			draw_polyline(PackedVector2Array([c + Vector2(0, 3), c + Vector2(9, -3), c + Vector2(9, -7)]), fg, 2.2, true)
+			draw_rect(Rect2(c + Vector2(6.5, -12), Vector2(5, 5)), fg)
+			draw_circle(bot, 3.5, fg)
+
+
 class LevelMeter extends Control:
 	## Vumètre à LEDs, deux canaux.
 	const SEG := 30
@@ -340,6 +405,8 @@ func _build_ui() -> void:
 
 	# --- En-tête : titre + pastille d'état
 	var head := HBoxContainer.new()
+	head_box = head
+	head.visible = false
 	root.add_child(head)
 	var tb := VBoxContainer.new()
 	tb.size_flags_horizontal = SIZE_EXPAND_FILL
@@ -366,9 +433,27 @@ func _build_ui() -> void:
 	app_box.visible = false
 	root.add_child(app_box)
 
+	# --- Accueil : héros
+	var hero := VBoxContainer.new()
+	hero.add_theme_constant_override("separation", 4)
+	home_box.add_child(hero)
+	var logo := TextureRect.new()
+	logo.texture = load("res://icon.svg")
+	logo.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	logo.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	logo.custom_minimum_size = Vector2(84, 84)
+	hero.add_child(logo)
+	var ht := _label("Sound Link", hero)
+	ht.add_theme_font_size_override("font_size", 34)
+	ht.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	var hs2 := _hint("Le son de ton PC sur ton téléphone,\net ton téléphone comme micro du PC.", hero)
+	hs2.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	hs2.add_theme_font_size_override("font_size", 14)
+	hero.add_child(HeroWave.new())
+
 	# --- Accueil : mises à jour + choix du mode
 	upd_card = PanelContainer.new()
-	upd_card.add_theme_stylebox_override("panel", _sb(Color("#1e1a3a"), 12, 14, 10, C_ACCENT))
+	upd_card.add_theme_stylebox_override("panel", _sb(C_CARD, 12, 14, 8, C_BORDER))
 	home_box.add_child(upd_card)
 	var uh := HBoxContainer.new()
 	upd_card.add_child(uh)
@@ -384,8 +469,17 @@ func _build_ui() -> void:
 	var ml := _label("CHOISIR UN MODE", home_box)
 	ml.add_theme_font_size_override("font_size", 12)
 	ml.add_theme_color_override("font_color", C_MUTED)
-	_mode_card(home_box, "Sans fil", "Wi-Fi / réseau local. Le plus simple. Latence ~60 à 100 ms.", false)
-	_mode_card(home_box, "USB", "Téléphone branché au PC avec le partage de connexion USB activé. Latence plus basse et stable (~30 à 50 ms), pas de coupures Wi-Fi.", true)
+	_mode_card(home_box, "Sans fil", "Host / clients sur le réseau local : PC, téléphones…", "~60–100 ms", false)
+	_mode_card(home_box, "Haut-parleur USB", "Le téléphone branché devient le haut-parleur du PC. Automatique.", "~30–50 ms", true)
+	var foot := LinkButton.new()
+	foot.text = "v%s  ·  github.com/goodview-soft/sound-link" % VERSION
+	foot.uri = "https://github.com/goodview-soft/sound-link"
+	foot.underline = LinkButton.UNDERLINE_MODE_ON_HOVER
+	foot.add_theme_color_override("font_color", C_MUTED)
+	foot.add_theme_color_override("font_hover_color", C_ACCENT2)
+	foot.add_theme_font_size_override("font_size", 12)
+	foot.size_flags_horizontal = SIZE_SHRINK_CENTER
+	home_box.add_child(foot)
 
 	root = app_box
 	var back_row := HBoxContainer.new()
@@ -395,12 +489,13 @@ func _build_ui() -> void:
 	conn_lbl.size_flags_horizontal = SIZE_EXPAND_FILL
 	conn_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 	conn_lbl.add_theme_color_override("font_color", C_ACCENT2)
-	usb_hint = _hint("USB : brancher le téléphone au PC, puis sur le téléphone : Paramètres → Réseau → Partage de connexion → Partage via USB. Lancer le host sur le PC : son IP est détectée toute seule.", root)
+	usb_hint = _hint("", root)
 
 	# --- Onglets segmentés
 	var seg := PanelContainer.new()
 	seg.add_theme_stylebox_override("panel", _sb(C_FIELD, 12, 4, 4, C_BORDER))
 	root.add_child(seg)
+	tabs_seg = seg
 	var tabs := HBoxContainer.new()
 	seg.add_child(tabs)
 	var group := ButtonGroup.new()
@@ -1066,6 +1161,7 @@ func _on_version_json(result: int, code: int, _h: PackedStringArray, body: Packe
 		return
 	upd_info = info
 	upd_btn.visible = true
+	upd_card.add_theme_stylebox_override("panel", _sb(Color("#1e1a3a"), 12, 14, 10, C_ACCENT))
 	var same_engine: bool = str(info.get("godot", "")) == "%d.%d.%d" % [Engine.get_version_info().major,
 		Engine.get_version_info().minor, Engine.get_version_info().patch]
 	if same_engine and info.has("pck"):
@@ -1114,10 +1210,10 @@ func _on_pck(result: int, code: int, _h: PackedStringArray, _b: PackedByteArray)
 
 # ---------------------------------------------------------------- Accueil / modes
 
-func _mode_card(parent: Node, title: String, desc: String, usb: bool) -> void:
+func _mode_card(parent: Node, title: String, desc: String, badge: String, usb: bool) -> void:
 	var b := Button.new()
 	b.theme_type_variation = "ModeCard"
-	b.custom_minimum_size.y = 108
+	b.custom_minimum_size.y = 96
 	parent.add_child(b)
 	var m := MarginContainer.new()
 	m.set_anchors_preset(PRESET_FULL_RECT)
@@ -1125,28 +1221,71 @@ func _mode_card(parent: Node, title: String, desc: String, usb: bool) -> void:
 	for side in ["left", "right", "top", "bottom"]:
 		m.add_theme_constant_override("margin_" + side, 16)
 	b.add_child(m)
+	var h := HBoxContainer.new()
+	h.mouse_filter = MOUSE_FILTER_IGNORE
+	h.add_theme_constant_override("separation", 14)
+	m.add_child(h)
+	var ic := ModeIcon.new(usb)
+	h.add_child(ic)
 	var v := VBoxContainer.new()
 	v.mouse_filter = MOUSE_FILTER_IGNORE
-	m.add_child(v)
-	var t := _label(title + "  ›", v)
-	t.add_theme_font_size_override("font_size", 20)
+	v.size_flags_horizontal = SIZE_EXPAND_FILL
+	v.alignment = BoxContainer.ALIGNMENT_CENTER
+	v.add_theme_constant_override("separation", 2)
+	h.add_child(v)
+	var tr := HBoxContainer.new()
+	tr.mouse_filter = MOUSE_FILTER_IGNORE
+	v.add_child(tr)
+	var t := _label(title, tr)
+	t.add_theme_font_size_override("font_size", 19)
+	t.size_flags_horizontal = SIZE_EXPAND_FILL
+	var bp := PanelContainer.new()
+	bp.mouse_filter = MOUSE_FILTER_IGNORE
+	bp.add_theme_stylebox_override("panel", _sb(Color(C_ACCENT2, 0.12), 10, 8, 2))
+	tr.add_child(bp)
+	var bl := _label(badge, bp)
+	bl.add_theme_font_size_override("font_size", 12)
+	bl.add_theme_color_override("font_color", C_ACCENT2)
 	_hint(desc, v)
+	var arrow := _label("›", h)
+	arrow.add_theme_font_size_override("font_size", 26)
+	arrow.add_theme_color_override("font_color", C_MUTED)
+	b.mouse_entered.connect(func() -> void: ic.hover = true)
+	b.mouse_exited.connect(func() -> void: ic.hover = false)
 	b.pressed.connect(_enter_app.bind(usb))
 
 
 func _enter_app(usb: bool) -> void:
 	low_latency = usb
 	cfg.set_value("app", "usb", usb)
-	conn_lbl.text = "Mode USB · faible latence" if usb else "Mode sans fil"
+	var phone := OS.has_feature("mobile")
+	conn_lbl.text = "Haut-parleur USB" if usb else "Mode sans fil"
 	usb_hint.visible = usb
+	tabs_seg.visible = not usb
+	ip_edit.visible = not usb
+	name_edit.visible = not usb
+	client_btn.visible = not usb
 	home_box.visible = false
+	head_box.visible = true
 	app_box.visible = true
+	if not usb:
+		return
+	# Haut-parleur USB : rôle automatique (PC = diffuse, téléphone = écoute), rien à régler.
+	if phone:
+		usb_hint.text = "Branche le téléphone au PC, puis active : Paramètres → Réseau → Partage de connexion → Partage via USB. Ouvre Sound Link en « Haut-parleur USB » sur le PC : la connexion se fait toute seule."
+		_set_mode("client")
+	else:
+		usb_hint.text = "Branche le téléphone, active le partage de connexion USB sur le téléphone et ouvre Sound Link en « Haut-parleur USB » dessus : le son du PC y part automatiquement."
+		_set_mode("host")
+		if not running:
+			_start_host()
 
 
 func _go_home() -> void:
 	if running:
 		_stop()
 	app_box.visible = false
+	head_box.visible = false
 	home_box.visible = true
 
 
@@ -1183,6 +1322,8 @@ func _discovery(now: float, delta: float) -> void:
 		found_lbl.add_theme_color_override("font_color", C_OK)
 		if not running and ip_edit.text.strip_edges() != ip and (low_latency or ip_edit.text.strip_edges() == ""):
 			ip_edit.text = ip
+		if low_latency and not running:
+			_start_client()  # haut-parleur USB : connexion automatique
 
 
 func _broadcast_addrs() -> PackedStringArray:
