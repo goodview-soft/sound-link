@@ -79,6 +79,8 @@ var upd_card: PanelContainer
 var home_box: VBoxContainer
 var head_box: HBoxContainer
 var ip_chip: Label
+var board_grid: GridContainer
+var board_vol := 0.8
 var app_box: VBoxContainer
 var conn_lbl: Label
 var found_lbl: Label
@@ -357,6 +359,10 @@ class Icon extends Control:
 					draw_rect(Rect2(_p(q.x + 2.5, q.y + 2.5), Vector2(2, 2) * _u), c)
 				draw_rect(Rect2(_p(14, 14), Vector2(3, 3) * _u), c)
 				draw_rect(Rect2(_p(18, 18), Vector2(3, 3) * _u), c)
+			"folder":
+				var pts := PackedVector2Array([_p(3, 6), _p(9, 6), _p(11, 8), _p(21, 8), _p(21, 19), _p(3, 19)])
+				pts.append(pts[0])
+				draw_polyline(pts, c, w, true)
 			"refresh":
 				draw_arc(_p(12, 12), 7 * _u, -0.3, PI * 1.55, 24, c, w, true)
 				draw_colored_polygon(PackedVector2Array([_p(19.5, 6), _p(20, 12), _p(14.5, 10)]), c)
@@ -573,6 +579,33 @@ func _build_ui() -> void:
 	clients_list.add_theme_constant_override("separation", 10)
 	hc.add_child(clients_list)
 
+	# Soundboard : joue dans le micro virtuel (entendu en jeu quand la diffusion tourne)
+	var sb := _card(host_box)
+	var sbh := HBoxContainer.new()
+	sbh.add_theme_constant_override("separation", 8)
+	sb.add_child(sbh)
+	var sbt := _label("Soundboard", sbh)
+	sbt.add_theme_font_size_override("font_size", 16)
+	sbt.size_flags_horizontal = SIZE_EXPAND_FILL
+	var fb := _icon_btn("folder", sbh)
+	fb.tooltip_text = "Ajouter mes sons (.wav .ogg .mp3)"
+	fb.pressed.connect(func() -> void:
+		DirAccess.make_dir_recursive_absolute(_sounds_dir())
+		OS.shell_open(_sounds_dir()))
+	_icon_btn("refresh", sbh).pressed.connect(_build_board)
+	board_grid = GridContainer.new()
+	board_grid.columns = 3
+	board_grid.add_theme_constant_override("h_separation", 8)
+	board_grid.add_theme_constant_override("v_separation", 8)
+	sb.add_child(board_grid)
+	_slider_line(sb, Icon.new("speaker", 22, C_MUTED), 0, 150, board_vol * 100.0, 80, func(x: float) -> String:
+		board_vol = x / 100.0
+		var bi := AudioServer.get_bus_index("Board")
+		if bi >= 0:
+			AudioServer.set_bus_volume_db(bi, linear_to_db(maxf(board_vol, 0.0001)))
+		return "%d%%" % roundi(x))
+	_build_board()
+
 	# Écouter (client)
 	client_box = VBoxContainer.new()
 	client_box.add_theme_constant_override("separation", 16)
@@ -719,6 +752,12 @@ func _make_theme() -> Theme:
 	for k in ["font_color", "font_hover_color", "font_pressed_color"]:
 		t.set_color(k, "Chip", C_ACCENT2)
 	t.set_font_size("font_size", "Chip", 13)
+
+	t.set_type_variation("Pad", "Button")
+	t.set_stylebox("normal", "Pad", _sb(Color("#1b1f2b"), 10, 6, 14, C_BORDER))
+	t.set_stylebox("hover", "Pad", _sb(Color("#232838"), 10, 6, 14, C_ACCENT))
+	t.set_stylebox("pressed", "Pad", _sb(Color("#2d2656"), 10, 6, 14, C_ACCENT))
+	t.set_font_size("font_size", "Pad", 13)
 
 	# Champs texte
 	t.set_stylebox("normal", "LineEdit", _sb(C_FIELD, 9, 12, 10, C_BORDER))
@@ -1369,3 +1408,97 @@ func _broadcast_addrs() -> PackedStringArray:
 		if a.contains(".") and not a.begins_with("127.") and not a.begins_with("169.254"):
 			out.append(a.substr(0, a.rfind(".")) + ".255")
 	return out
+
+
+# ---------------------------------------------------------------- Soundboard
+
+func _sounds_dir() -> String:
+	return OS.get_user_data_dir().path_join("sons")
+
+
+func _build_board() -> void:
+	for ch in board_grid.get_children():
+		ch.queue_free()
+	var bi := _make_bus("Board", [])
+	AudioServer.set_bus_volume_db(bi, linear_to_db(maxf(board_vol, 0.0001)))
+	var items := []
+	for k in ["Radio ON", "Radio OFF", "Grésillement", "Alerte", "Ping", "SOS"]:
+		items.append([k, _synth(k)])
+	var d := DirAccess.open(_sounds_dir())
+	if d:
+		for f in d.get_files():
+			var path := _sounds_dir().path_join(f)
+			var st: AudioStream = null
+			match f.get_extension().to_lower():
+				"wav": st = AudioStreamWAV.load_from_file(path)
+				"ogg": st = AudioStreamOggVorbis.load_from_file(path)
+				"mp3": st = AudioStreamMP3.load_from_file(path)
+			if st:
+				items.append([f.get_basename(), st])
+	for it in items:
+		var b := _button(it[0], board_grid)
+		b.theme_type_variation = "Pad"
+		b.size_flags_horizontal = SIZE_EXPAND_FILL
+		b.clip_text = true
+		b.tooltip_text = it[0]
+		var pl := AudioStreamPlayer.new()
+		pl.stream = it[1]
+		pl.bus = "Board"
+		b.add_child(pl)
+		b.pressed.connect(func() -> void: pl.play())
+
+
+## Sons d'exemple générés (style radio militaire), mono 16 bits 44,1 kHz.
+func _synth(kind: String) -> AudioStreamWAV:
+	var sr := 44100
+	var out: Array[float] = []
+	var rng := RandomNumberGenerator.new()
+	rng.seed = hash(kind)
+	var tone := func(f: float, dur: float, amp: float) -> void:
+		for i in int(dur * sr):
+			var e := minf(1.0, minf(i, int(dur * sr) - i) / 220.0)
+			out.append(sin(TAU * f * i / sr) * amp * e)
+	var noise := func(dur: float, amp: float, fade: bool) -> void:
+		var lp := 0.0
+		var n := int(dur * sr)
+		for i in n:
+			lp += (rng.randf_range(-1, 1) - lp) * 0.35  # bruit « radio » un peu étouffé
+			out.append(lp * amp * ((1.0 - float(i) / n) if fade else 1.0))
+	var silence := func(dur: float) -> void:
+		for i in int(dur * sr):
+			out.append(0.0)
+	match kind:
+		"Radio ON":
+			noise.call(0.012, 1.0, false)
+			noise.call(0.22, 0.45, true)
+		"Radio OFF":
+			tone.call(1200.0, 0.07, 0.5)
+			tone.call(1650.0, 0.09, 0.5)
+			noise.call(0.18, 0.5, true)
+		"Grésillement":
+			noise.call(1.3, 0.4, true)
+		"Alerte":
+			for r in 2:
+				var n := int(0.7 * sr)
+				var ph := 0.0
+				for i in n:
+					ph += TAU * lerpf(600.0, 1250.0, float(i) / n) / sr
+					out.append(signf(sin(ph)) * 0.22)
+		"Ping":
+			var n := int(0.9 * sr)
+			for i in n:
+				out.append(sin(TAU * 1400.0 * i / sr) * 0.55 * exp(-5.0 * i / sr))
+		"SOS":
+			for sym in "...---...":
+				tone.call(800.0, 0.09 if sym == "." else 0.27, 0.45)
+				silence.call(0.09)
+	var data := PackedByteArray()
+	data.resize(out.size() * 2)
+	for i in out.size():
+		data.encode_s16(i * 2, int(clampf(out[i], -1.0, 1.0) * 32767.0))
+	var w := AudioStreamWAV.new()
+	w.format = AudioStreamWAV.FORMAT_16_BITS
+	w.mix_rate = sr
+	w.stereo = false
+	w.data = data
+	return w
