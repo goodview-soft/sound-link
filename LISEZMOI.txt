@@ -1,0 +1,17 @@
+Sound Link — partage audio en réseau local (Linux x86_64)
+
+Installer (menu des applications) : ./install.sh   — ou lancer directement : ./sound-link.sh
+Prérequis : PulseAudio ou PipeWire (commande pactl).
+
+HOST (le PC qui diffuse)
+  - Onglet Host, garder la source « Default » = son du PC, puis Démarrer.
+  - Donner l'IP affichée aux clients. Pare-feu : ouvrir le port UDP 4242.
+  - Les micros des clients arrivent dans le micro « Sound-Link-Micro »
+    (à choisir dans Discord, OBS, etc.).
+
+CLIENT (écoute)
+  - Onglet Client, entrer l'IP du host, Se connecter.
+  - « Servir de micro au PC » envoie votre micro au host.
+    Utiliser un casque (ou « Muet ») pour éviter l'écho.
+
+Le micro virtuel disparaît au redémarrage ; il est recréé à chaque lancement.

@@ -14,8 +14,15 @@ sed -i "s/^const VERSION := .*/const VERSION := \"$V\"/" version.gd
 $GODOT --headless --path . --export-pack "Linux" "$OUT/soundlink-$V.pck"
 $GODOT --headless --path . --export-release "Linux" build/linux/SoundLink.x86_64
 $GODOT --headless --path . --export-debug "Android" "$OUT/SoundLink-$V.apk"
+cp install.sh icon.svg LISEZMOI.txt build/linux/
 rm -rf build/SoundLink && cp -r build/linux build/SoundLink
 (cd build && zip -qr "release/SoundLink-$V-linux.zip" SoundLink) && rm -rf build/SoundLink
+
+# Noms fixes pour les liens « latest » (QR code, install.sh)
+cp "$OUT/SoundLink-$V.apk" "$OUT/SoundLink.apk"
+cp "$OUT/SoundLink-$V-linux.zip" "$OUT/SoundLink-linux.zip"
+cp install.sh "$OUT/install.sh"
+rm -f "$OUT"/*.idsig
 
 SHA="$(sha256sum "$OUT/soundlink-$V.pck" | cut -d' ' -f1)"
 cat > "$OUT/version.json" <<J

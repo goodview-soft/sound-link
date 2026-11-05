@@ -444,6 +444,24 @@ func _build_ui() -> void:
 	clients_list = VBoxContainer.new()
 	clients_list.add_theme_constant_override("separation", 10)
 	hc.add_child(clients_list)
+	if not OS.has_feature("mobile"):
+		var qc := _card(host_box, "Installer sur un téléphone")
+		var qh := HBoxContainer.new()
+		qh.add_theme_constant_override("separation", 14)
+		qc.add_child(qh)
+		var qr := TextureRect.new()
+		qr.texture = load("res://qr_apk.svg")
+		qr.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		qr.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		qr.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+		qr.custom_minimum_size = Vector2(132, 132)
+		qh.add_child(qr)
+		var qv := VBoxContainer.new()
+		qv.size_flags_horizontal = SIZE_EXPAND_FILL
+		qv.alignment = BoxContainer.ALIGNMENT_CENTER
+		qh.add_child(qv)
+		_label("Scanner avec le téléphone", qv)
+		_hint("Télécharge la dernière version de l'appli Android. Autoriser l'installation si Android le demande, puis choisir Sans fil ou USB : l'IP de ce PC est détectée toute seule.", qv)
 
 	# --- Client
 	client_box = VBoxContainer.new()
