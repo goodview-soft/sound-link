@@ -83,9 +83,7 @@ var head_box: HBoxContainer
 var tabs_seg: PanelContainer
 var app_box: VBoxContainer
 var conn_lbl: Label
-var usb_hint: Label
 var found_lbl: Label
-var low_latency := false
 var disc := PacketPeerUDP.new()
 var beacon_t := 0.0
 var upd_lbl: Label
@@ -285,15 +283,13 @@ class HeroWave extends Control:
 
 
 class ModeIcon extends Control:
-	## Pastille ronde avec un pictogramme Wi-Fi ou USB dessiné.
-	var usb := false
+	## Pastille ronde avec un pictogramme Wi-Fi dessiné.
 	var hover := false:
 		set(v):
 			hover = v
 			queue_redraw()
 
-	func _init(is_usb: bool) -> void:
-		usb = is_usb
+	func _init() -> void:
 		custom_minimum_size = Vector2(52, 52)
 		size_flags_vertical = SIZE_SHRINK_CENTER
 		mouse_filter = MOUSE_FILTER_IGNORE
@@ -304,21 +300,10 @@ class ModeIcon extends Control:
 		draw_circle(c, 26, Color(acc, 0.28 if hover else 0.16))
 		draw_arc(c, 25.5, 0, TAU, 48, Color(acc, 0.7), 1.5, true)
 		var fg := Color("#e7eaf0")
-		if not usb:
-			var o := c + Vector2(0, 8)
-			for r in [7.0, 13.0, 19.0]:
-				draw_arc(o, r, deg_to_rad(-135), deg_to_rad(-45), 20, fg, 2.5, true)
-			draw_circle(o, 2.6, fg)
-		else:
-			var top := c + Vector2(0, -15)
-			var bot := c + Vector2(0, 13)
-			draw_line(top + Vector2(0, 5), bot, fg, 2.5, true)
-			draw_colored_polygon(PackedVector2Array([top, top + Vector2(-5, 7), top + Vector2(5, 7)]), fg)
-			draw_polyline(PackedVector2Array([c + Vector2(0, 7), c + Vector2(-9, 0), c + Vector2(-9, -5)]), fg, 2.2, true)
-			draw_circle(c + Vector2(-9, -7), 3, fg)
-			draw_polyline(PackedVector2Array([c + Vector2(0, 3), c + Vector2(9, -3), c + Vector2(9, -7)]), fg, 2.2, true)
-			draw_rect(Rect2(c + Vector2(6.5, -12), Vector2(5, 5)), fg)
-			draw_circle(bot, 3.5, fg)
+		var o := c + Vector2(0, 8)
+		for r in [7.0, 13.0, 19.0]:
+			draw_arc(o, r, deg_to_rad(-135), deg_to_rad(-45), 20, fg, 2.5, true)
+		draw_circle(o, 2.6, fg)
 
 
 class LevelMeter extends Control:
@@ -466,11 +451,10 @@ func _build_ui() -> void:
 	upd_btn.pressed.connect(_do_update)
 	upd_btn.visible = false
 	upd_lbl.text = "Recherche de mises à jour…"
-	var ml := _label("CHOISIR UN MODE", home_box)
+	var ml := _label("COMMENCER", home_box)
 	ml.add_theme_font_size_override("font_size", 12)
 	ml.add_theme_color_override("font_color", C_MUTED)
-	_mode_card(home_box, "Sans fil", "Host / clients sur le réseau local : PC, téléphones…", "~60–100 ms", false)
-	_mode_card(home_box, "Haut-parleur USB", "Le téléphone branché devient le haut-parleur du PC. Automatique.", "~30–50 ms", true)
+	_mode_card(home_box, "Sans fil", "Host / clients sur le réseau local : PC, téléphones…", "~60–100 ms")
 	var foot := LinkButton.new()
 	foot.text = "v%s  ·  github.com/goodview-soft/sound-link" % VERSION
 	foot.uri = "https://github.com/goodview-soft/sound-link"
@@ -489,7 +473,6 @@ func _build_ui() -> void:
 	conn_lbl.size_flags_horizontal = SIZE_EXPAND_FILL
 	conn_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 	conn_lbl.add_theme_color_override("font_color", C_ACCENT2)
-	usb_hint = _hint("", root)
 
 	# --- Onglets segmentés
 	var seg := PanelContainer.new()
@@ -556,7 +539,7 @@ func _build_ui() -> void:
 		qv.alignment = BoxContainer.ALIGNMENT_CENTER
 		qh.add_child(qv)
 		_label("Scanner avec le téléphone", qv)
-		_hint("Télécharge la dernière version de l'appli Android. Autoriser l'installation si Android le demande, puis choisir Sans fil ou USB : l'IP de ce PC est détectée toute seule.", qv)
+		_hint("Télécharge la dernière version de l'appli Android. Autoriser l'installation si Android le demande, puis choisir Sans fil : l'IP de ce PC est détectée toute seule.", qv)
 
 	# --- Client
 	client_box = VBoxContainer.new()
@@ -912,7 +895,6 @@ func _start_client() -> void:
 		return
 	udp.set_dest_address(ip, PORT)
 	rx = RxStream.new(self, true, 0)
-	_tune(rx)
 	running = true
 	hello_t = 0.0
 	mic_seq = 0
@@ -1021,7 +1003,6 @@ func _host_process(now: float) -> Vector2:
 			c["t"] = now
 			if c["rx"] == null:
 				c["rx"] = RxStream.new(self, false, 4, c["bus"])
-				_tune(c["rx"])
 			c["rx"].receive(pkt, now)
 			continue
 		var msg := pkt.get_string_from_ascii()
@@ -1210,7 +1191,7 @@ func _on_pck(result: int, code: int, _h: PackedStringArray, _b: PackedByteArray)
 
 # ---------------------------------------------------------------- Accueil / modes
 
-func _mode_card(parent: Node, title: String, desc: String, badge: String, usb: bool) -> void:
+func _mode_card(parent: Node, title: String, desc: String, badge: String) -> void:
 	var b := Button.new()
 	b.theme_type_variation = "ModeCard"
 	b.custom_minimum_size.y = 96
@@ -1225,7 +1206,7 @@ func _mode_card(parent: Node, title: String, desc: String, badge: String, usb: b
 	h.mouse_filter = MOUSE_FILTER_IGNORE
 	h.add_theme_constant_override("separation", 14)
 	m.add_child(h)
-	var ic := ModeIcon.new(usb)
+	var ic := ModeIcon.new()
 	h.add_child(ic)
 	var v := VBoxContainer.new()
 	v.mouse_filter = MOUSE_FILTER_IGNORE
@@ -1252,33 +1233,14 @@ func _mode_card(parent: Node, title: String, desc: String, badge: String, usb: b
 	arrow.add_theme_color_override("font_color", C_MUTED)
 	b.mouse_entered.connect(func() -> void: ic.hover = true)
 	b.mouse_exited.connect(func() -> void: ic.hover = false)
-	b.pressed.connect(_enter_app.bind(usb))
+	b.pressed.connect(_enter_app)
 
 
-func _enter_app(usb: bool) -> void:
-	low_latency = usb
-	cfg.set_value("app", "usb", usb)
-	var phone := OS.has_feature("mobile")
-	conn_lbl.text = "Haut-parleur USB" if usb else "Mode sans fil"
-	usb_hint.visible = usb
-	tabs_seg.visible = not usb
-	ip_edit.visible = not usb
-	name_edit.visible = not usb
-	client_btn.visible = not usb
+func _enter_app() -> void:
+	conn_lbl.text = "Mode sans fil"
 	home_box.visible = false
 	head_box.visible = true
 	app_box.visible = true
-	if not usb:
-		return
-	# Haut-parleur USB : rôle automatique (PC = diffuse, téléphone = écoute), rien à régler.
-	if phone:
-		usb_hint.text = "Branche le téléphone au PC, puis active : Paramètres → Réseau → Partage de connexion → Partage via USB. Ouvre Sound Link en « Haut-parleur USB » sur le PC : la connexion se fait toute seule."
-		_set_mode("client")
-	else:
-		usb_hint.text = "Branche le téléphone, active le partage de connexion USB sur le téléphone et ouvre Sound Link en « Haut-parleur USB » dessus : le son du PC y part automatiquement."
-		_set_mode("host")
-		if not running:
-			_start_host()
 
 
 func _go_home() -> void:
@@ -1287,11 +1249,6 @@ func _go_home() -> void:
 	app_box.visible = false
 	head_box.visible = false
 	home_box.visible = true
-
-
-func _tune(r: RxStream) -> void:
-	r.prebuffer = 2 if low_latency else 4
-	r.max_queue = 5 if low_latency else 8
 
 
 # ---------------------------------------------------------------- Découverte du host
@@ -1320,10 +1277,8 @@ func _discovery(now: float, delta: float) -> void:
 			continue
 		found_lbl.text = "Host détecté : %s" % ip
 		found_lbl.add_theme_color_override("font_color", C_OK)
-		if not running and ip_edit.text.strip_edges() != ip and (low_latency or ip_edit.text.strip_edges() == ""):
+		if not running and ip_edit.text.strip_edges() == "":
 			ip_edit.text = ip
-		if low_latency and not running:
-			_start_client()  # haut-parleur USB : connexion automatique
 
 
 func _broadcast_addrs() -> PackedStringArray:
