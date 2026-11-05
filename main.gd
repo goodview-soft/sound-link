@@ -81,6 +81,9 @@ var head_box: HBoxContainer
 var ip_chip: Label
 var board_grids := []  # [grille, bus]
 var board_until := 0.0
+var board_cap := AudioEffectCapture.new()
+var board_to_game := true
+var board_to_clients := false
 var board_vol := 0.8
 var app_box: VBoxContainer
 var conn_lbl: Label
@@ -408,6 +411,8 @@ func _ready() -> void:
 	balance = cfg.get_value("client", "balance", 0.0)
 	send_mic = cfg.get_value("client", "send_mic", false)
 	mic_gain = cfg.get_value("client", "mic_gain", 1.0)
+	board_to_game = cfg.get_value("board", "game", true)
+	board_to_clients = cfg.get_value("board", "clients", false)
 	_build_ui()
 	_set_mode(cfg.get_value("app", "mode", "client"))
 	_check_update()
@@ -430,6 +435,8 @@ func _save() -> void:
 	cfg.set_value("client", "name", name_edit.text)
 	cfg.set_value("client", "send_mic", send_mic)
 	cfg.set_value("client", "mic_gain", mic_gain)
+	cfg.set_value("board", "game", board_to_game)
+	cfg.set_value("board", "clients", board_to_clients)
 	cfg.save(CFG_PATH)
 
 
@@ -732,6 +739,13 @@ func _make_theme() -> Theme:
 		t.set_color(k, "Chip", C_ACCENT2)
 	t.set_font_size("font_size", "Chip", 13)
 
+	t.set_type_variation("Toggle", "Button")
+	t.set_stylebox("normal", "Toggle", _sb(Color("#1d2130"), 10, 12, 5, C_BORDER))
+	t.set_stylebox("hover", "Toggle", _sb(Color("#272c3c"), 10, 12, 5, C_BORDER))
+	t.set_stylebox("pressed", "Toggle", _sb(C_ACCENT, 10, 12, 5))
+	t.set_stylebox("hover_pressed", "Toggle", _sb(C_ACCENT.lightened(0.08), 10, 12, 5))
+	t.set_color("font_color", "Toggle", C_MUTED)
+	t.set_font_size("font_size", "Toggle", 13)
 	t.set_type_variation("Pad", "Button")
 	t.set_stylebox("normal", "Pad", _sb(Color("#1b1f2b"), 10, 6, 14, C_BORDER))
 	t.set_stylebox("hover", "Pad", _sb(Color("#232838"), 10, 6, 14, C_ACCENT))
@@ -1172,9 +1186,13 @@ func _host_process(now: float) -> Vector2:
 		pkt.encode_u32(4, rate)
 		seq = (seq + 1) & 0xFFFFFFFF
 		var o := 8
-		for f in frames:
-			var l := clampf(f.x * host_gain, -1.0, 1.0)
-			var r := clampf(f.y * host_gain, -1.0, 1.0)
+		var bf := _board_frames()
+		for j in frames.size():
+			var f := frames[j] * host_gain
+			if j < bf.size():
+				f += bf[j]  # soundboard partagée avec les clients
+			var l := clampf(f.x, -1.0, 1.0)
+			var r := clampf(f.y, -1.0, 1.0)
 			pl = maxf(pl, absf(l))
 			pr = maxf(pr, absf(r))
 			pkt.encode_s16(o, int(l * 32767.0))
@@ -1424,6 +1442,26 @@ func _board_card(parent: Node, bus: String) -> void:
 	_slider_line(sb, Icon.new("speaker", 22, C_MUTED), 0, 150, board_vol * 100.0, 80, func(x: float) -> String:
 		board_vol = x / 100.0
 		return "%d%%" % roundi(x))
+	if bus == "Board":  # host : où envoyer la soundboard
+		var dr := HBoxContainer.new()
+		dr.add_theme_constant_override("separation", 8)
+		sb.add_child(dr)
+		var dl := _label("Envoyer vers", dr)
+		dl.add_theme_color_override("font_color", C_MUTED)
+		dl.add_theme_font_size_override("font_size", 13)
+		dl.size_flags_horizontal = SIZE_EXPAND_FILL
+		for opt in [["Jeu", "game"], ["Clients", "clients"]]:
+			var t := _button(opt[0], dr)
+			t.theme_type_variation = "Toggle"
+			t.toggle_mode = true
+			t.button_pressed = board_to_game if opt[1] == "game" else board_to_clients
+			t.tooltip_text = "Micro virtuel (entendu en jeu)" if opt[1] == "game" else "Son diffusé aux clients"
+			t.toggled.connect(func(on: bool) -> void:
+				if opt[1] == "game":
+					board_to_game = on
+				else:
+					board_to_clients = on
+				_apply_board_route())
 	board_grids.append([grid, bus])
 
 
@@ -1432,7 +1470,8 @@ const BOARD_SOUNDS := ["Tir", "Rafale", "Tir lointain", "Sniper", "Explosion", "
 
 
 func _build_board() -> void:
-	_make_bus("Board", [])
+	_make_bus("Board", [board_cap])
+	_apply_board_route()
 	_ensure_capture()
 	var items := []
 	for k in BOARD_SOUNDS:
@@ -1552,3 +1591,20 @@ func _synth(kind: String) -> AudioStreamWAV:
 	w.stereo = false
 	w.data = data
 	return w
+
+
+## Jeu = le bus Board sort vers le micro virtuel ; Clients = capturé et mixé au flux diffusé.
+func _apply_board_route() -> void:
+	var bi := AudioServer.get_bus_index("Board")
+	if bi >= 0:
+		AudioServer.set_bus_mute(bi, not board_to_game)  # la capture marche même bus coupé
+
+
+func _board_frames() -> PackedVector2Array:
+	if not board_to_clients:
+		board_cap.clear_buffer()
+		return PackedVector2Array()
+	var av := board_cap.get_frames_available()
+	if av > FRAMES_PER_PACKET * 3:
+		board_cap.get_buffer(av - FRAMES_PER_PACKET)  # retard accumulé : on le jette
+	return board_cap.get_buffer(mini(FRAMES_PER_PACKET, board_cap.get_frames_available()))
