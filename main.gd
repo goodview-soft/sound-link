@@ -79,7 +79,8 @@ var upd_card: PanelContainer
 var home_box: VBoxContainer
 var head_box: HBoxContainer
 var ip_chip: Label
-var board_grid: GridContainer
+var board_grids := []  # [grille, bus]
+var board_until := 0.0
 var board_vol := 0.8
 var app_box: VBoxContainer
 var conn_lbl: Label
@@ -579,32 +580,7 @@ func _build_ui() -> void:
 	clients_list.add_theme_constant_override("separation", 10)
 	hc.add_child(clients_list)
 
-	# Soundboard : joue dans le micro virtuel (entendu en jeu quand la diffusion tourne)
-	var sb := _card(host_box)
-	var sbh := HBoxContainer.new()
-	sbh.add_theme_constant_override("separation", 8)
-	sb.add_child(sbh)
-	var sbt := _label("Soundboard", sbh)
-	sbt.add_theme_font_size_override("font_size", 16)
-	sbt.size_flags_horizontal = SIZE_EXPAND_FILL
-	var fb := _icon_btn("folder", sbh)
-	fb.tooltip_text = "Ajouter mes sons (.wav .ogg .mp3)"
-	fb.pressed.connect(func() -> void:
-		DirAccess.make_dir_recursive_absolute(_sounds_dir())
-		OS.shell_open(_sounds_dir()))
-	_icon_btn("refresh", sbh).pressed.connect(_build_board)
-	board_grid = GridContainer.new()
-	board_grid.columns = 3
-	board_grid.add_theme_constant_override("h_separation", 8)
-	board_grid.add_theme_constant_override("v_separation", 8)
-	sb.add_child(board_grid)
-	_slider_line(sb, Icon.new("speaker", 22, C_MUTED), 0, 150, board_vol * 100.0, 80, func(x: float) -> String:
-		board_vol = x / 100.0
-		var bi := AudioServer.get_bus_index("Board")
-		if bi >= 0:
-			AudioServer.set_bus_volume_db(bi, linear_to_db(maxf(board_vol, 0.0001)))
-		return "%d%%" % roundi(x))
-	_build_board()
+	_board_card(host_box, "Board")  # host : joue dans le micro virtuel
 
 	# Écouter (client)
 	client_box = VBoxContainer.new()
@@ -671,6 +647,9 @@ func _build_ui() -> void:
 		if running:
 			if on: _start_capture("Default")
 			else: _stop_capture())
+
+	_board_card(client_box, "Capture")  # client : part vers le host avec le micro
+	_build_board()
 
 	meter = LevelMeter.new()
 	app_box.add_child(meter)
@@ -997,10 +976,7 @@ func _start_capture(dev: String) -> void:
 		return
 	if OS.get_name() == "Android":
 		OS.request_permissions()
-	if capture == null:
-		capture = AudioEffectCapture.new()
-		var idx := _make_bus("Capture", [capture, AudioEffectSpectrumAnalyzer.new()])
-		AudioServer.set_bus_mute(idx, true)  # pas de retour local (évite l'écho)
+	_ensure_capture()
 	AudioServer.input_device = dev
 	mic_player = AudioStreamPlayer.new()
 	mic_player.stream = AudioStreamMicrophone.new()
@@ -1216,8 +1192,8 @@ func _client_process(now: float, delta: float) -> Vector2:
 		udp.put_packet(("HELLO " + name_edit.text.strip_edges()).to_utf8_buffer())
 		hello_t = 1.0
 
-	# Micro -> host
-	if mic_player:
+	# Micro (+ soundboard) -> host
+	if mic_player or now < board_until:
 		var rate := int(AudioServer.get_mix_rate())
 		while capture.get_frames_available() >= FRAMES_PER_PACKET:
 			var frames := capture.get_buffer(FRAMES_PER_PACKET)
@@ -1231,6 +1207,8 @@ func _client_process(now: float, delta: float) -> Vector2:
 				pkt.encode_s16(o, int(clampf((f.x + f.y) * 0.5 * mic_gain, -1.0, 1.0) * 32767.0))
 				o += 2
 			udp.put_packet(pkt)
+	elif capture:
+		capture.clear_buffer()  # rien à envoyer : on garde le tampon frais
 
 	# Host -> haut-parleur
 	while udp.get_available_packet_count() > 0:
@@ -1416,13 +1394,48 @@ func _sounds_dir() -> String:
 	return OS.get_user_data_dir().path_join("sons")
 
 
+func _ensure_capture() -> void:
+	if capture == null:
+		capture = AudioEffectCapture.new()
+		var idx := _make_bus("Capture", [capture, AudioEffectSpectrumAnalyzer.new()])
+		AudioServer.set_bus_mute(idx, true)  # pas de retour local (évite l'écho)
+
+
+func _board_card(parent: Node, bus: String) -> void:
+	var sb := _card(parent)
+	var sbh := HBoxContainer.new()
+	sbh.add_theme_constant_override("separation", 8)
+	sb.add_child(sbh)
+	var sbt := _label("Soundboard", sbh)
+	sbt.add_theme_font_size_override("font_size", 16)
+	sbt.size_flags_horizontal = SIZE_EXPAND_FILL
+	if not OS.has_feature("mobile"):
+		var fb := _icon_btn("folder", sbh)
+		fb.tooltip_text = "Ajouter mes sons (.wav .ogg .mp3)"
+		fb.pressed.connect(func() -> void:
+			DirAccess.make_dir_recursive_absolute(_sounds_dir())
+			OS.shell_open(_sounds_dir()))
+	_icon_btn("refresh", sbh).pressed.connect(_build_board)
+	var grid := GridContainer.new()
+	grid.columns = 3
+	grid.add_theme_constant_override("h_separation", 8)
+	grid.add_theme_constant_override("v_separation", 8)
+	sb.add_child(grid)
+	_slider_line(sb, Icon.new("speaker", 22, C_MUTED), 0, 150, board_vol * 100.0, 80, func(x: float) -> String:
+		board_vol = x / 100.0
+		return "%d%%" % roundi(x))
+	board_grids.append([grid, bus])
+
+
+const BOARD_SOUNDS := ["Tir", "Rafale", "Tir lointain", "Sniper", "Explosion", "Recharge",
+	"Radio ON", "Radio OFF", "Grésillement", "Alerte", "Ping", "SOS"]
+
+
 func _build_board() -> void:
-	for ch in board_grid.get_children():
-		ch.queue_free()
-	var bi := _make_bus("Board", [])
-	AudioServer.set_bus_volume_db(bi, linear_to_db(maxf(board_vol, 0.0001)))
+	_make_bus("Board", [])
+	_ensure_capture()
 	var items := []
-	for k in ["Radio ON", "Radio OFF", "Grésillement", "Alerte", "Ping", "SOS"]:
+	for k in BOARD_SOUNDS:
 		items.append([k, _synth(k)])
 	var d := DirAccess.open(_sounds_dir())
 	if d:
@@ -1435,20 +1448,30 @@ func _build_board() -> void:
 				"mp3": st = AudioStreamMP3.load_from_file(path)
 			if st:
 				items.append([f.get_basename(), st])
-	for it in items:
-		var b := _button(it[0], board_grid)
-		b.theme_type_variation = "Pad"
-		b.size_flags_horizontal = SIZE_EXPAND_FILL
-		b.clip_text = true
-		b.tooltip_text = it[0]
-		var pl := AudioStreamPlayer.new()
-		pl.stream = it[1]
-		pl.bus = "Board"
-		b.add_child(pl)
-		b.pressed.connect(func() -> void: pl.play())
+	for gb in board_grids:
+		var grid: GridContainer = gb[0]
+		var bus: String = gb[1]
+		for ch in grid.get_children():
+			ch.queue_free()
+		for it in items:
+			var b := _button(it[0], grid)
+			b.theme_type_variation = "Pad"
+			b.size_flags_horizontal = SIZE_EXPAND_FILL
+			b.clip_text = true
+			b.tooltip_text = it[0]
+			var pl := AudioStreamPlayer.new()
+			pl.stream = it[1]
+			pl.bus = bus
+			pl.max_polyphony = 4
+			b.add_child(pl)
+			b.pressed.connect(func() -> void:
+				pl.volume_db = linear_to_db(maxf(board_vol, 0.0001))
+				pl.play()
+				if bus == "Capture":  # client : garder l'envoi ouvert pendant le son
+					board_until = maxf(board_until, Time.get_ticks_msec() / 1000.0 + pl.stream.get_length() + 0.3))
 
 
-## Sons d'exemple générés (style radio militaire), mono 16 bits 44,1 kHz.
+## Sons d'exemple générés (combat + radio), mono 16 bits 44,1 kHz.
 func _synth(kind: String) -> AudioStreamWAV:
 	var sr := 44100
 	var out: Array[float] = []
@@ -1464,10 +1487,37 @@ func _synth(kind: String) -> AudioStreamWAV:
 		for i in n:
 			lp += (rng.randf_range(-1, 1) - lp) * 0.35  # bruit « radio » un peu étouffé
 			out.append(lp * amp * ((1.0 - float(i) / n) if fade else 1.0))
+	# Détonation : bruit filtré (k = brillance) à décroissance exponentielle + coup sourd grave
+	var burst := func(dur: float, amp: float, k: float, decay: float, thump: float) -> void:
+		var lp := 0.0
+		for i in int(dur * sr):
+			var t := float(i) / sr
+			lp += (rng.randf_range(-1, 1) - lp) * k
+			var v := lp * amp * exp(-decay * t) * 1.6
+			if thump > 0:
+				v += sin(TAU * thump * t * (1.0 - t)) * amp * 0.7 * exp(-decay * 0.5 * t)
+			out.append(v)
 	var silence := func(dur: float) -> void:
 		for i in int(dur * sr):
 			out.append(0.0)
 	match kind:
+		"Tir":
+			burst.call(0.45, 1.0, 0.55, 14.0, 95.0)
+		"Rafale":
+			for r in 6:
+				burst.call(0.085, 0.9, 0.6, 28.0, 110.0)
+			burst.call(0.35, 0.35, 0.25, 9.0, 0.0)
+		"Tir lointain":
+			burst.call(1.1, 0.55, 0.06, 4.5, 55.0)
+		"Sniper":
+			burst.call(0.12, 1.0, 0.9, 30.0, 0.0)
+			burst.call(1.0, 0.3, 0.08, 3.5, 40.0)
+		"Explosion":
+			burst.call(2.4, 1.0, 0.045, 2.0, 38.0)
+		"Recharge":
+			for gap in [0.0, 0.22, 0.06, 0.35]:
+				silence.call(gap)
+				burst.call(0.035, 0.7, 0.95, 140.0, 0.0)
 		"Radio ON":
 			noise.call(0.012, 1.0, false)
 			noise.call(0.22, 0.45, true)
