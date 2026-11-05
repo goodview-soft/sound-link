@@ -449,8 +449,6 @@ func _build_ui() -> void:
 	upd_btn.theme_type_variation = "Tab"
 	upd_btn.toggle_mode = false
 	upd_btn.pressed.connect(_do_update)
-	upd_btn.visible = false
-	upd_lbl.text = "Recherche de mises à jour…"
 	var ml := _label("COMMENCER", home_box)
 	ml.add_theme_font_size_override("font_size", 12)
 	ml.add_theme_color_override("font_color", C_MUTED)
@@ -1122,14 +1120,20 @@ func _local_ips() -> String:
 # ---------------------------------------------------------------- Mise à jour
 
 func _check_update() -> void:
-	upd_http = HTTPRequest.new()
-	upd_http.timeout = 10.0
-	add_child(upd_http)
+	if upd_http == null:
+		upd_http = HTTPRequest.new()
+		upd_http.timeout = 10.0
+		add_child(upd_http)
+	upd_http.cancel_request()
+	upd_lbl.text = "Recherche de mises à jour…"
+	upd_btn.visible = false
 	upd_http.request_completed.connect(_on_version_json, CONNECT_ONE_SHOT)
 	upd_http.request(UPDATE_URL)
 
 
 func _on_version_json(result: int, code: int, _h: PackedStringArray, body: PackedByteArray) -> void:
+	upd_btn.text = "Vérifier"
+	upd_btn.visible = true
 	if result != HTTPRequest.RESULT_SUCCESS or code != 200:
 		upd_lbl.text = ("✓  v%s (aucune version publiée)" % VERSION) if code == 404 \
 			else "Mises à jour : vérification impossible (hors ligne ?)."
@@ -1154,6 +1158,9 @@ func _on_version_json(result: int, code: int, _h: PackedStringArray, body: Packe
 
 
 func _do_update() -> void:
+	if upd_btn.text == "Vérifier":
+		_check_update()
+		return
 	if upd_btn.text == "Télécharger":
 		OS.shell_open(RELEASES_URL)
 		return
