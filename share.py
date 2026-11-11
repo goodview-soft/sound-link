@@ -213,6 +213,10 @@ for _grp, _to in (("lLiI1|!", "l"), ("oO0Q", "o"), ("bBD8", "b"), ("sS5", "s"), 
         _FOLD[_c] = _to
 
 
+for _c, _t in zip("АВСЕНКМОРТХУИаесорху", "abcehkmoptxyuaecopxy"):
+    _FOLD[_c] = _t
+
+
 def canon(t):
     """Forme repliée : les caractères que l'OCR confond (l/I/1, o/0, b/D...) deviennent identiques."""
     return "".join(_FOLD.get(c, c.lower()) for c in t if c.isalnum())
@@ -248,6 +252,83 @@ def update_players(lines, now):
 
 def player_name(g):
     return max(g["votes"], key=lambda v: (g["votes"][v], len(v)))
+
+
+CHAT_RE = re.compile(r"^(?P<chan>\[[^\]]{1,12}\]\s*)?(?P<name>[^:]{2,32}?):\s*(?P<msg>.+)$")
+
+
+def split_chat(text):
+    """« [Team] Pseudo: message » -> (pseudo, message)."""
+    m = CHAT_RE.match(text)
+    if not m:
+        tok = text.split(" ", 1)  # « : » non lu : un premier mot long avec « _ » est un pseudo
+        if len(tok) == 2 and len(tok[0]) >= 6 and "_" in tok[0]:
+            return tok[0], tok[1].strip()
+        return "", text
+    return ((m.group("chan") or "") + m.group("name")).strip(), m.group("msg").strip()
+
+
+def detect_lang(t):
+    letters = [c for c in t if c.isalpha()]
+    if letters and sum("\u0400" <= c <= "\u04ff" for c in letters) / len(letters) > 0.5:
+        return "ru"
+    try:
+        from langdetect import detect_langs
+        best = detect_langs(t)[0]
+        # petits messages de jeu : seules des langues sûres sont retenues, sinon on suppose de l'anglais
+        if best.lang != "en" and (best.prob < 0.85 or (len(t) < 30 and best.lang not in ("fr", "es", "de", "it", "pt", "ru"))):
+            return "en"
+        return best.lang
+    except Exception:
+        return "en"
+
+
+tr_lock = threading.Lock()
+tr_failed = set()
+
+
+def ensure_pair(a, b):
+    import argostranslate.package as ap
+    import argostranslate.translate as at
+    if any(l.code == a and any(t.to_lang.code == b for t in l.translations_from) for l in at.get_installed_languages()):
+        return True
+    if (a, b) in tr_failed:
+        return False
+    try:
+        ap.update_package_index()
+        pk = next((p for p in ap.get_available_packages() if p.from_code == a and p.to_code == b), None)
+        if pk is None:
+            tr_failed.add((a, b))
+            return False
+        ap.install_from_path(pk.download())
+        return True
+    except Exception:
+        tr_failed.add((a, b))
+        return False
+
+
+def translate_fr(text, src):
+    """Traduction hors ligne vers le français (via l'anglais si besoin). Les paquets se téléchargent au premier usage."""
+    import argostranslate.translate as at
+    steps = [(src, "fr")] if ensure_pair(src, "fr") else ([(src, "en"), ("en", "fr")] if src != "en" and ensure_pair(src, "en") and ensure_pair("en", "fr") else None)
+    if not steps:
+        return ""
+    for a, b in steps:
+        text = at.translate(text, a, b)
+    return text.strip()
+
+
+def enrich(e):
+    """Sépare pseudo / message, détecte la langue et traduit en français (en tâche de fond)."""
+    e["name"], e["msg"] = split_chat(e["text"])
+    e["lang"] = detect_lang(e["msg"]) if len(norm(e["msg"])) >= 3 else ""
+    if e["lang"] and e["lang"] != "fr":
+        try:
+            with tr_lock:
+                e["tr"] = translate_fr(e["msg"], e["lang"])
+        except Exception:
+            pass
+    e["done"] = True
 
 
 pending = []  # lignes vues une seule fois : acceptées si relues (évite les lectures parasites)
