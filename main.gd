@@ -96,6 +96,7 @@ var upd_http: HTTPRequest
 var upd_info := {}
 const VOX_PORT := 4244
 const VOX_PY_PORT := 4245
+const SCREEN_PORT := 4246
 const VOX_LANGS := [["Français", "fr"], ["English", "en"], ["Español", "es"], ["Deutsch", "de"], ["Italiano", "it"], ["Русский", "ru"]]
 var vox_lists := []  # [VBoxContainer, is_host]
 var vox_items := []  # host : voix détectées {id, who, clock, text, tr, lang, pcm}
@@ -124,6 +125,20 @@ var vox_poll_t := 0.0
 var vox_since := 0.0
 var vox_stat_t := 0.0
 var vox_clip_id := 0
+var win_opt: OptionButton
+var win_ids := []
+var share_btn: Button
+var share_q := 720
+var share_lbl: Label
+var scr_http: HTTPRequest
+var scr_view_http: HTTPRequest
+var scr_on := false
+var scr_busy := false
+var scr_seq := -1
+var scr_next_t := 0.0
+var scr_tex: TextureRect
+var scr_lbl: Label
+var scr_img_tex: ImageTexture
 var tts_lang := "fr"
 var tts_http: HTTPRequest
 var tts_bus := "Board"
@@ -531,6 +546,13 @@ func _ready() -> void:
 	vox_stat_http.request_completed.connect(_on_vox_status)
 	vox_list_http.request_completed.connect(_on_vox_list)
 	vox_clip_http.request_completed.connect(_on_vox_clip)
+	scr_http = HTTPRequest.new()
+	scr_http.timeout = 5.0
+	add_child(scr_http)
+	scr_view_http = HTTPRequest.new()
+	scr_view_http.timeout = 6.0
+	add_child(scr_view_http)
+	scr_view_http.request_completed.connect(_on_screen_frame)
 	tts_http = HTTPRequest.new()
 	tts_http.timeout = 90.0
 	add_child(tts_http)
@@ -713,6 +735,7 @@ func _build_ui() -> void:
 	clients_list.add_theme_constant_override("separation", 10)
 	hc.add_child(clients_list)
 
+	_screen_card(host_box)
 	_board_card(host_box, "Board")  # host : joue dans le micro virtuel
 
 	# Écouter (client)
@@ -782,6 +805,7 @@ func _build_ui() -> void:
 			if on: _start_capture("Default")
 			else: _stop_capture())
 
+	_screen_view_card(client_box)
 	_board_card(client_box, "Capture")  # client : part vers le host avec le micro
 	_build_board()
 
@@ -1075,6 +1099,8 @@ func _set_mode(m: String) -> void:
 	client_box.visible = m == "client"
 	if m == "host":
 		_refresh_devices()
+		if not OS.has_feature("mobile") and win_opt:
+			_windows_refresh()
 
 
 func _refresh_devices() -> void:
@@ -1184,6 +1210,8 @@ func _stop() -> void:
 		udp.put_packet("BYE".to_ascii_buffer())
 	running = false
 	udp.close()
+	if mode == "host":
+		_share_stop_req()
 	_vox_stop()
 	vox_tcp.stop()
 	vox_conns.clear()
@@ -1265,6 +1293,7 @@ func _process(delta: float) -> void:
 		peaks = _host_process(now) if mode == "host" else _client_process(now, delta)
 		if mode == "client":
 			_vox_client_tick(now)
+			_screen_client_tick(now)
 	level_l = maxf(level_l * 0.88, peaks.x)
 	level_r = maxf(level_r * 0.88, peaks.y)
 	meter.set_levels(sqrt(level_l), sqrt(level_r))
@@ -2322,3 +2351,138 @@ func _on_vox_auto(res: int, code: int, _h: PackedStringArray, body: PackedByteAr
 	add_child(pl)
 	pl.finished.connect(pl.queue_free)
 	pl.play()
+
+
+
+# ---------------------------------------------------------------- Partage d'une fenêtre
+func _screen_card(parent: Node) -> void:
+	var c := _card(parent, "Partager une fenêtre")
+	var r1 := HBoxContainer.new()
+	r1.add_theme_constant_override("separation", 8)
+	c.add_child(r1)
+	win_opt = OptionButton.new()
+	win_opt.size_flags_horizontal = SIZE_EXPAND_FILL
+	win_opt.clip_text = true
+	r1.add_child(win_opt)
+	_icon_btn("refresh", r1).pressed.connect(_windows_refresh)
+	var r2 := HBoxContainer.new()
+	r2.add_theme_constant_override("separation", 8)
+	c.add_child(r2)
+	share_btn = _button("Partager", r2)
+	share_btn.theme_type_variation = "Toggle"
+	share_btn.toggle_mode = true
+	share_btn.size_flags_horizontal = SIZE_EXPAND_FILL
+	share_btn.toggled.connect(func(on: bool) -> void:
+		if on:
+			_share_start_req()
+		else:
+			_share_stop_req())
+	var qo := OptionButton.new()
+	for q in [480, 720, 1080]:
+		qo.add_item("%dp" % q)
+		if q == share_q:
+			qo.select(qo.item_count - 1)
+	qo.item_selected.connect(func(i: int) -> void: share_q = [480, 720, 1080][i])
+	r2.add_child(qo)
+	share_lbl = _hint("Les clients voient la fenêtre dans Écouter → Écran du host.", c)
+
+
+func _windows_refresh() -> void:
+	_vox_spawn()
+	var h := HTTPRequest.new()
+	h.timeout = 5.0
+	add_child(h)
+	h.request_completed.connect(func(res: int, code: int, _hd: PackedStringArray, body: PackedByteArray) -> void:
+		h.queue_free()
+		if res != HTTPRequest.RESULT_SUCCESS or code != 200:
+			share_lbl.text = "Moteur indisponible (lancer via sound-link.sh)."
+			return
+		var j: Variant = JSON.parse_string(body.get_string_from_utf8())
+		if typeof(j) != TYPE_ARRAY:
+			return
+		win_opt.clear()
+		win_ids.clear()
+		for w in j:
+			win_opt.add_item(str(w["title"]))
+			win_ids.append(str(w["id"]))
+		if win_ids.is_empty():
+			share_lbl.text = "Aucune fenêtre trouvée.")
+	h.request("http://127.0.0.1:%d/windows" % VOX_PY_PORT)
+
+
+func _share_start_req() -> void:
+	if win_opt.selected < 0 or win_opt.selected >= win_ids.size():
+		_windows_refresh()
+		share_btn.set_pressed_no_signal(false)
+		share_lbl.text = "Choisis une fenêtre (liste vide : appuie sur ↻ puis réessaie)."
+		return
+	var title := win_opt.get_item_text(win_opt.selected)
+	scr_http.cancel_request()
+	scr_http.request("http://127.0.0.1:%d/share?win=%s&h=%d" % [VOX_PY_PORT, win_ids[win_opt.selected], share_q],
+		PackedStringArray(), HTTPClient.METHOD_POST, "")
+	share_lbl.text = "● Partage de « %s » en cours" % title
+
+
+func _share_stop_req() -> void:
+	if scr_http == null or not is_instance_valid(scr_http) or not scr_http.is_inside_tree():
+		return
+	if is_instance_valid(share_btn):
+		share_btn.set_pressed_no_signal(false)
+		share_lbl.text = "Les clients voient la fenêtre dans Écouter → Écran du host."
+	scr_http.cancel_request()
+	scr_http.request("http://127.0.0.1:%d/share?stop=1" % VOX_PY_PORT, PackedStringArray(), HTTPClient.METHOD_POST, "")
+
+
+# --- Côté client
+func _screen_view_card(parent: Node) -> void:
+	var c := _card(parent, "Écran du host")
+	var tg := _button("Afficher l'écran partagé", c)
+	tg.theme_type_variation = "Toggle"
+	tg.toggle_mode = true
+	tg.toggled.connect(func(on: bool) -> void:
+		scr_on = on
+		scr_seq = -1
+		scr_next_t = 0.0
+		scr_tex.visible = on
+		scr_lbl.visible = on
+		scr_lbl.text = "Connexion…")
+	scr_lbl = _hint("", c)
+	scr_lbl.visible = false
+	scr_tex = TextureRect.new()
+	scr_tex.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	scr_tex.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	scr_tex.custom_minimum_size = Vector2(0, 240)
+	scr_tex.visible = false
+	c.add_child(scr_tex)
+
+
+func _screen_client_tick(now: float) -> void:
+	if not scr_on or scr_busy or now < scr_next_t:
+		return
+	scr_busy = true
+	scr_view_http.request("http://%s:%d/?after=%d" % [ip_edit.text.strip_edges(), SCREEN_PORT, scr_seq])
+
+
+func _on_screen_frame(res: int, code: int, hdrs: PackedStringArray, body: PackedByteArray) -> void:
+	scr_busy = false
+	var now := Time.get_ticks_msec() / 1000.0
+	if res != HTTPRequest.RESULT_SUCCESS or code == 404:
+		scr_lbl.text = "Aucune fenêtre partagée par le host."
+		scr_seq = -1
+		scr_next_t = now + 1.5
+		return
+	for hd in hdrs:
+		if hd.to_lower().begins_with("x-seq:"):
+			scr_seq = int(hd.get_slice(":", 1).strip_edges())
+	if code != 200 or body.is_empty():
+		return
+	var img := Image.new()
+	if img.load_jpg_from_buffer(body) != OK:
+		return
+	if scr_img_tex == null or scr_img_tex.get_size() != Vector2(img.get_size()):
+		scr_img_tex = ImageTexture.create_from_image(img)
+		scr_tex.texture = scr_img_tex
+	else:
+		scr_img_tex.update(img)
+	scr_tex.custom_minimum_size.y = clampf(scr_tex.size.x * img.get_height() / maxf(img.get_width(), 1.0), 120.0, 900.0)
+	scr_lbl.text = ""
