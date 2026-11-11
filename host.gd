@@ -103,6 +103,7 @@ func _ready() -> void:
 		if on and _overlay == null:
 			_overlay = Overlay.new()
 			add_child(_overlay)
+			_overlay.push("Sound Link", "en", "Overlay active", "Overlay actif : les messages traduits s'afficheront ici.")
 		elif not on and _overlay:
 			_overlay.queue_free()
 			_overlay = null)

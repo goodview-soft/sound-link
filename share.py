@@ -131,7 +131,7 @@ def setup_tessdata():
 
 
 def norm(t):
-    return re.sub(r"[^0-9a-zàâçéèêëîïôûùüÿñæœ]+", "", t.lower())
+    return re.sub(r"[^0-9a-zàâçéèêëîïôûùüÿñæœа-яё]+", "", t.lower())
 
 
 def _read_rapid(img):
@@ -319,15 +319,24 @@ def translate_fr(text, src):
 
 
 def enrich(e):
-    """Sépare pseudo / message, détecte la langue et traduit en français (en tâche de fond)."""
-    e["name"], e["msg"] = split_chat(e["text"])
-    e["lang"] = detect_lang(e["msg"]) if len(norm(e["msg"])) >= 3 else ""
+    """Sépare pseudo / message, détecte la langue et traduit en français (en tâche de fond, avec reprises)."""
+    e["done"] = False
+    text = e["text"]
+    e["name"], e["msg"] = split_chat(text)
+    e["lang"] = detect_lang(e["msg"]) if len(norm(e["msg"])) >= 2 else ""
+    e["tr"] = ""
     if e["lang"] and e["lang"] != "fr":
-        try:
-            with tr_lock:
-                e["tr"] = translate_fr(e["msg"], e["lang"])
-        except Exception:
-            pass
+        for attempt in range(3):
+            try:
+                with tr_lock:
+                    e["tr"] = translate_fr(e["msg"], e["lang"])
+            except Exception:
+                e["tr"] = ""
+            if e["tr"] or e["text"] != text:
+                break
+            time.sleep(2.0)
+    if e["text"] != text:  # relu entre-temps (meilleure lecture) : on refait avec le nouveau texte
+        return enrich(e)
     e["done"] = True
 
 
@@ -350,7 +359,7 @@ def update_chat(lines, now):
             dup["seen"] = now
             if sc > dup["score"] and len(n) >= 0.9 * len(dup["norm"]):  # meilleure lecture de la même ligne
                 dup.update(text=ln, norm=n, score=sc)
-                dup["name"], dup["msg"] = split_chat(ln)
+                threading.Thread(target=enrich, args=(dup,), daemon=True).start()
             continue
         pen = next((p for p in pending if difflib.SequenceMatcher(None, n, p["norm"]).ratio() >= 0.8), None)
         if pen is None:
