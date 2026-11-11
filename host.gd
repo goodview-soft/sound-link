@@ -23,6 +23,10 @@ var _chat_scroll: ScrollContainer
 var _chat_sig := ""
 var _ocr_t := 0.0
 var _cfg := ConfigFile.new()
+var _overlay: Overlay
+var _ov_on := false
+var _ov_primed := false
+var _ov_done := {}
 var _tex: ImageTexture
 var _sharing := false
 var _busy := false
@@ -89,6 +93,19 @@ func _ready() -> void:
 	_players_box.add_theme_constant_override("separation", 4)
 	pc.add_child(_players_box)
 	var cc := Ui.card(self, "Chat récupéré")
+	var ob := Ui.button("Traduction en jeu (overlay haut droite)", cc)
+	ob.theme_type_variation = "Toggle"
+	ob.toggle_mode = true
+	ob.tooltip_text = "Affiche les messages traduits en français par-dessus le jeu"
+	ob.toggled.connect(func(on: bool) -> void:
+		_ov_on = on
+		_ov_primed = false
+		if on and _overlay == null:
+			_overlay = Overlay.new()
+			add_child(_overlay)
+		elif not on and _overlay:
+			_overlay.queue_free()
+			_overlay = null)
 	_chat_scroll = ScrollContainer.new()
 	_chat_scroll.custom_minimum_size = Vector2(0, 260)
 	_chat_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
@@ -248,20 +265,59 @@ func _on_ocr(ok: bool, body: PackedByteArray) -> void:
 	if _players_box.get_child_count() == 0:
 		Ui.hint("Aucun joueur détecté (trace le cadre « joueurs »).", _players_box)
 	var lines: Array = j.get("chat", [])
-	var sig := "%d:%s" % [lines.size(), str(lines[-1]["id"]) if not lines.is_empty() else ""]
+	_overlay_feed(lines)
+	var tr_n := 0
+	for m in lines:
+		if str(m.get("tr", "")) != "":
+			tr_n += 1
+	var sig := "%d:%s:%d" % [lines.size(), str(lines[-1]["id"]) if not lines.is_empty() else "", tr_n]
 	if sig == _chat_sig:
 		return
 	_chat_sig = sig
 	for ch in _chat_box.get_children():
 		ch.queue_free()
 	for m in lines:
-		var l := Ui.label(str(m["text"]), _chat_box)
-		l.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-		l.add_theme_font_size_override("font_size", 14)
+		var r := RichTextLabel.new()
+		r.bbcode_enabled = true
+		r.fit_content = true
+		r.scroll_active = false
+		r.add_theme_font_size_override("normal_font_size", 14)
+		r.add_theme_font_size_override("bold_font_size", 14)
+		var who := str(m.get("name", ""))
+		var t := ""
+		if who != "":
+			t = "[color=#22d3ee][b]%s[/b][/color]  " % _bb(who)
+		t += _bb(str(m.get("msg", "")))
+		if str(m.get("tr", "")) != "":
+			t += "\n[color=#7c6cff]→ %s[/color]" % _bb(str(m["tr"]))
+		r.text = t
+		_chat_box.add_child(r)
 	if lines.is_empty():
 		Ui.hint("Rien pour l'instant (trace le cadre « chat »).", _chat_box)
 	await get_tree().process_frame
 	_chat_scroll.scroll_vertical = int(_chat_scroll.get_v_scroll_bar().max_value)
+
+
+func _bb(t: String) -> String:
+	return t.replace("[", "[lb]")
+
+
+## Envoie à l'overlay les nouveaux messages une fois traduits (les messages déjà là à l'activation sont ignorés).
+func _overlay_feed(lines: Array) -> void:
+	if not _ov_on or _overlay == null:
+		return
+	for m in lines:
+		var id := int(m["id"])
+		if _ov_done.has(id):
+			continue
+		if not _ov_primed:
+			_ov_done[id] = true
+		elif str(m.get("tr", "")) != "":
+			_ov_done[id] = true
+			_overlay.push(str(m.get("name", "")), str(m.get("lang", "")), str(m.get("msg", "")), str(m["tr"]))
+		elif m.get("done", false):
+			_ov_done[id] = true  # déjà en français ou non traduisible
+	_ov_primed = true
 
 
 func _exit_tree() -> void:

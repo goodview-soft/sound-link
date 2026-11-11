@@ -26,6 +26,8 @@ window/size/viewport_height=780
 window/stretch/mode="canvas_items"
 window/stretch/aspect="expand"
 window/handheld/orientation=1
+window/per_pixel_transparency/allowed=true
+window/subwindows/embed_subwindows=false
 
 [rendering]
 

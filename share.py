@@ -109,7 +109,25 @@ players = {}  # pseudo -> dernier instant vu
 chat = []     # {id, text, norm, seen}
 chat_next = [1]
 _ocr = []
-LANGS = "eng+fra" if os.path.exists("/usr/share/tesseract-ocr/5/tessdata/fra.traineddata") or os.path.exists("/usr/share/tesseract-ocr/4.00/tessdata/fra.traineddata") else "eng"
+TESSDIR = os.path.expanduser("~/.local/share/sound-link/tessdata")
+LANGS = "eng"
+
+
+def setup_tessdata():
+    """Prépare le dossier de langues (anglais, français, russe) utilisé par Tesseract."""
+    import glob, urllib.request
+    os.makedirs(TESSDIR, exist_ok=True)
+    for src in glob.glob("/usr/share/tesseract-ocr/*/tessdata") + ["/usr/share/tessdata"]:
+        for f in ("eng.traineddata", "fra.traineddata"):
+            if os.path.exists(os.path.join(src, f)) and not os.path.exists(os.path.join(TESSDIR, f)):
+                shutil.copy(os.path.join(src, f), TESSDIR)
+        if os.path.isdir(os.path.join(src, "configs")) and not os.path.isdir(os.path.join(TESSDIR, "configs")):
+            shutil.copytree(os.path.join(src, "configs"), os.path.join(TESSDIR, "configs"))
+    if not os.path.exists(TESSDIR + "/rus.traineddata"):
+        try:
+            urllib.request.urlretrieve("https://github.com/tesseract-ocr/tessdata_fast/raw/main/rus.traineddata", TESSDIR + "/rus.traineddata")
+        except Exception:
+            pass
 
 
 def norm(t):
@@ -161,15 +179,18 @@ def _clean(txt):
 
 def read_lines(img):
     """Lignes de texte (texte, confiance) : Tesseract si présent (bons espaces), sinon RapidOCR."""
+    global LANGS
     if not shutil.which("tesseract"):
         return _read_rapid(img)
+    if LANGS == "eng" and os.path.exists(TESSDIR + "/rus.traineddata") and os.path.isdir(TESSDIR + "/configs"):
+        LANGS = "eng+fra+rus"
     from PIL import Image, ImageOps
     k = 3 if img.size[1] < 160 else 2 if img.size[1] < 400 else 1
     if k > 1:
         img = img.resize((img.size[0] * k, img.size[1] * k), Image.LANCZOS)
     buf = io.BytesIO()
     ImageOps.autocontrast(img, cutoff=1).save(buf, "PNG")
-    out = subprocess.run(["tesseract", "stdin", "stdout", "--psm", "6", "-l", LANGS, "tsv"],
+    out = subprocess.run(["tesseract", "stdin", "stdout", "--psm", "6", "-l", LANGS] + (["--tessdata-dir", TESSDIR] if LANGS != "eng" else []) + ["tsv"],
                          input=buf.getvalue(), capture_output=True, timeout=15).stdout.decode("utf-8", "replace")
     rows = {}
     for ln in out.splitlines()[1:]:
@@ -186,12 +207,47 @@ def read_lines(img):
     return res
 
 
+_FOLD = {}
+for _grp, _to in (("lLiI1|!", "l"), ("oO0Q", "o"), ("bBD8", "b"), ("sS5", "s"), ("zZ2", "z"), ("gG69q", "g"), ("uUvV", "u"), ("nN", "n")):
+    for _c in _grp:
+        _FOLD[_c] = _to
+
+
+def canon(t):
+    """Forme repliée : les caractères que l'OCR confond (l/I/1, o/0, b/D...) deviennent identiques."""
+    return "".join(_FOLD.get(c, c.lower()) for c in t if c.isalnum())
+
+
+def name_part(t):
+    """Pseudo seul : on enlève le tag/grade devant (« 42MHz (Recon)Pseudo » -> « Pseudo »)."""
+    return re.split(r"[)\]]", t)[-1].strip() or t
+
+
+def same_player(a, b):
+    ca, cb = canon(a), canon(b)
+    na, nb = canon(name_part(a)), canon(name_part(b))
+    if min(len(na), len(nb)) >= 4 and (na in nb or nb in na):
+        return True
+    return max(difflib.SequenceMatcher(None, ca, cb).ratio(), difflib.SequenceMatcher(None, na, nb).ratio()) >= 0.68
+
+
 def update_players(lines, now):
     for ln, sc in lines:
-        if sc < 0.5 or len(norm(ln)) < 3:
+        if sc < 0.4 or len(canon(ln)) < 3:
             continue
-        key = next((k for k in players if difflib.SequenceMatcher(None, norm(k), norm(ln)).ratio() >= 0.8), ln)
-        players[key] = now
+        g = next((g for g in players.values() if any(same_player(v, ln) for v in g["votes"])), None)
+        if g is None:
+            g = {"votes": {}, "t": now}
+            players[len(players) + int(now * 1000)] = g
+        g["votes"][ln] = g["votes"].get(ln, 0) + 1  # on affichera la lecture la plus fréquente
+        g["t"] = now
+    if len(players) > 40:
+        for k in sorted(players, key=lambda k: players[k]["t"])[:-30]:
+            del players[k]
+
+
+def player_name(g):
+    return max(g["votes"], key=lambda v: (g["votes"][v], len(v)))
 
 
 pending = []  # lignes vues une seule fois : acceptées si relues (évite les lectures parasites)
@@ -213,6 +269,7 @@ def update_chat(lines, now):
             dup["seen"] = now
             if sc > dup["score"] and len(n) >= 0.9 * len(dup["norm"]):  # meilleure lecture de la même ligne
                 dup.update(text=ln, norm=n, score=sc)
+                dup["name"], dup["msg"] = split_chat(ln)
             continue
         pen = next((p for p in pending if difflib.SequenceMatcher(None, n, p["norm"]).ratio() >= 0.8), None)
         if pen is None:
@@ -224,7 +281,9 @@ def update_chat(lines, now):
             pen.update(text=ln, norm=n, score=sc)
         if pen["count"] >= 2:
             pending.remove(pen)
-            e = {"id": chat_next[0], "text": pen["text"], "norm": pen["norm"], "score": pen["score"], "seen": now}
+            e = {"id": chat_next[0], "text": pen["text"], "norm": pen["norm"], "score": pen["score"], "seen": now,
+                 "name": "", "msg": pen["text"], "lang": "", "tr": "", "done": False}
+            threading.Thread(target=enrich, args=(e,), daemon=True).start()
             chat_next[0] += 1
             chat.append(e)
             recent.append(e)
@@ -259,9 +318,10 @@ def ocr_loop():
 
 def ocr_state():
     now = time.time()
-    return {"speaking": [k for k, t in players.items() if now - t < 1.8],
-            "players": sorted(players, key=lambda k: -players[k])[:20],
-            "chat": [{"id": e["id"], "text": e["text"]} for e in chat[-200:]]}
+    gs = sorted(players.values(), key=lambda g: -g["t"])
+    return {"speaking": [player_name(g) for g in gs if now - g["t"] < 2.5],
+            "players": [player_name(g) for g in gs[:20]],
+            "chat": [{"id": e["id"], "name": e["name"], "msg": e["msg"], "lang": e["lang"], "tr": e["tr"], "done": e["done"]} for e in chat[-200:]]}
 
 
 class Quiet(BaseHTTPRequestHandler):
@@ -329,5 +389,6 @@ if __name__ == "__main__":
         threading.Thread(target=ThreadingHTTPServer(("0.0.0.0", FRAME_PORT), Frames).serve_forever, daemon=True).start()
     except OSError:
         pass
+    threading.Thread(target=setup_tessdata, daemon=True).start()
     threading.Thread(target=ocr_loop, daemon=True).start()
     ThreadingHTTPServer(("127.0.0.1", API_PORT), Api).serve_forever()
