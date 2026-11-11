@@ -25,6 +25,8 @@ var _ocr_t := 0.0
 var _cfg := ConfigFile.new()
 var _ai_on := false
 var _ai_speak := true
+var _ai_write := false
+var _ai_chatkey: LineEdit
 var _ai_me: LineEdit
 var _ai_ptt: LineEdit
 var _ai_box: VBoxContainer
@@ -123,12 +125,29 @@ func _ready() -> void:
 	_ai_me.focus_exited.connect(_ai_send)
 	ar.add_child(_ai_me)
 	_ai_ptt = LineEdit.new()
-	_ai_ptt.placeholder_text = "Touche push-to-talk"
+	_ai_ptt.placeholder_text = "Touche radio (MAJ)"
 	_ai_ptt.custom_minimum_size.x = 130
 	_ai_ptt.text_submitted.connect(func(_t: String) -> void: _ai_send())
 	_ai_ptt.focus_exited.connect(_ai_send)
 	ar.add_child(_ai_ptt)
-	Ui.hint("Dans le jeu, choisis le micro « Sound-Link-Micro ». Si le jeu demande une touche pour parler, indique-la (ex. v).", ac)
+	var wb := Ui.button("Écrire aussi dans le chat du jeu", ac)
+	wb.theme_type_variation = "Toggle"
+	wb.toggle_mode = true
+	wb.tooltip_text = "Appuie sur la touche chat, tape la réponse puis valide. Le jeu doit être au premier plan."
+	wb.toggled.connect(func(on: bool) -> void:
+		_ai_write = on
+		_ai_send())
+	var kr := HBoxContainer.new()
+	kr.add_theme_constant_override("separation", 8)
+	ac.add_child(kr)
+	Ui.label("Touche pour ouvrir le chat", kr).size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_ai_chatkey = LineEdit.new()
+	_ai_chatkey.text = "!"
+	_ai_chatkey.custom_minimum_size.x = 70
+	_ai_chatkey.focus_exited.connect(_ai_send)
+	_ai_chatkey.text_submitted.connect(func(_t: String) -> void: _ai_send())
+	kr.add_child(_ai_chatkey)
+	Ui.hint("Dans le jeu, choisis le micro « Sound-Link-Micro ». Radio : touche MAJ. Pour écrire, le jeu doit rester au premier plan.", ac)
 	_ai_box = VBoxContainer.new()
 	_ai_box.add_theme_constant_override("separation", 4)
 	ac.add_child(_ai_box)
@@ -283,6 +302,7 @@ func _load_regions() -> void:
 		_ai_me.text = str(_cfg.get_value("assistant", "me", ""))
 		_ai_ptt.text = str(_cfg.get_value("assistant", "ptt", ""))
 		_ai_speak = bool(_cfg.get_value("assistant", "speak", true))
+		_ai_chatkey.text = str(_cfg.get_value("assistant", "chatkey", "!"))
 		for k in _preview.regions:
 			_preview.regions[k] = _cfg.get_value("regions", k, Rect2())
 
@@ -349,8 +369,12 @@ func _ai_send() -> void:
 	_cfg.set_value("assistant", "me", _ai_me.text)
 	_cfg.set_value("assistant", "ptt", _ai_ptt.text)
 	_cfg.set_value("assistant", "speak", _ai_speak)
+	_cfg.set_value("assistant", "write", _ai_write)
+	_cfg.set_value("assistant", "chatkey", _ai_chatkey.text)
 	_cfg.save(CFG)
-	_call("/assistant?on=%d&speak=%d&me=%s&ptt=%s" % [int(_ai_on), int(_ai_speak), _ai_me.text.uri_encode(), _ai_ptt.text.uri_encode()],
+	var ptt := _ai_ptt.text if _ai_ptt.text.strip_edges() != "" else "MAJ"
+	_call("/assistant?on=%d&speak=%d&write=%d&me=%s&ptt=%s&chat=%s" % [int(_ai_on), int(_ai_speak), int(_ai_write),
+		_ai_me.text.uri_encode(), ptt.uri_encode(), _ai_chatkey.text.uri_encode()],
 		HTTPClient.METHOD_POST)
 
 

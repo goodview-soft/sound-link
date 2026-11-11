@@ -512,7 +512,7 @@ VOICES = {"fr": "fr_FR-siwis-medium", "en": "en_US-lessac-medium", "es": "es_ES-
 VDIR = os.path.expanduser("~/.local/share/sound-link/voices")
 _voices = {}
 tts_lock = threading.Lock()
-asst = {"on": False, "speak": True, "model": "gemma3:4b", "me": "", "ptt": "", "last": 0.0, "seen": set(), "log": [], "busy": False}
+asst = {"on": False, "speak": True, "model": "gemma3:4b", "me": "", "ptt": "MAJ", "write": False, "chatkey": "!", "last": 0.0, "seen": set(), "log": [], "busy": False}
 OLLAMA = "http://127.0.0.1:11434/api/chat"
 PROMPT = ("Tu es un joueur sympa et plein d'humour dans un jeu multijoueur. Tu reçois le chat récent et un nouveau message. "
           "Réponds par UNE seule courte phrase (12 mots maximum), taquine mais bienveillante, dans la langue demandée. "
@@ -540,20 +540,85 @@ def tts_wav(text, lang):
     return buf.getvalue()
 
 
+KEY_ALIASES = {"maj": "Shift_L", "shift": "Shift_L", "ctrl": "Control_L", "alt": "Alt_L", "espace": "space",
+               "entrée": "Return", "entree": "Return", "tab": "Tab"}
+
+
+def _keysym(name):
+    from Xlib import XK
+    if len(name) == 1:  # un caractère : son keysym est son code (Latin-1) ou 0x1000000 + Unicode
+        return ord(name) if ord(name) <= 0xFF else 0x1000000 + ord(name)
+    name = name.strip()
+    return XK.string_to_keysym(KEY_ALIASES.get(name.lower(), name))
+
+
+def plan_key(d, name):
+    """Séquence de touches pour un nom ou un caractère : [(keycode, modificateur ou None)]."""
+    from Xlib import XK
+    sym = _keysym(name)
+    if not sym:
+        return None
+    for code, idx in d.keysym_to_keycodes(sym):
+        mod = {0: None, 1: "Shift_L", 2: "ISO_Level3_Shift", 3: "ISO_Level3_Shift"}.get(idx)
+        return code, (d.keysym_to_keycode(XK.string_to_keysym(mod)) if mod else None)
+    return None
+
+
+def tap(d, plan, hold=0.02):
+    from Xlib import X
+    from Xlib.ext import xtest
+    code, mod = plan
+    if mod:
+        xtest.fake_input(d, X.KeyPress, mod)
+    xtest.fake_input(d, X.KeyPress, code)
+    xtest.fake_input(d, X.KeyRelease, code)
+    if mod:
+        xtest.fake_input(d, X.KeyRelease, mod)
+    d.sync()
+    time.sleep(hold)
+
+
 def press_ptt(down):
-    """Maintient / relâche la touche push-to-talk du jeu (X11 XTEST)."""
+    """Maintient / relâche la touche push-to-talk du jeu (X11 XTEST) : MAJ par défaut."""
     key = asst["ptt"].strip()
     if not key:
         return
     try:
-        from Xlib import X, XK, display
+        from Xlib import X, display
         from Xlib.ext import xtest
         d = display.Display()
-        code = d.keysym_to_keycode(XK.string_to_keysym(key))
-        xtest.fake_input(d, X.KeyPress if down else X.KeyRelease, code)
-        d.sync()
+        sym = _keysym(key)
+        code = d.keysym_to_keycode(sym)
+        if code:
+            xtest.fake_input(d, X.KeyPress if down else X.KeyRelease, code)
+            d.sync()
     except Exception:
         pass
+
+
+def write_in_game_chat(text):
+    """Ouvre le chat du jeu (touche « ! »), tape le texte, valide avec Entrée. Seuls les caractères présents
+    sur le clavier sont tapés (pas de cyrillique sur une disposition française)."""
+    import unicodedata
+    from Xlib import display
+    d = display.Display()
+    plans = []
+    opener = plan_key(d, asst["chatkey"] or "!")
+    if not opener:
+        return
+    for ch in unicodedata.normalize("NFKC", text):
+        pl = plan_key(d, ch if ch != " " else "space")
+        if pl is None and ch.isalpha():  # lettre accentuée absente : on tente sans accent
+            base = unicodedata.normalize("NFKD", ch)[0]
+            pl = plan_key(d, base)
+        if pl:
+            plans.append(pl)
+    if len(plans) < 3:
+        return
+    tap(d, opener, 0.25)
+    for pl in plans:
+        tap(d, pl, 0.025)
+    tap(d, plan_key(d, "Return"), 0.1)
 
 
 def speak(text, lang):
@@ -621,6 +686,8 @@ def assistant_loop():
                     lang = e["lang"] if e["lang"] in VOICES else "en"
                     asst["log"].append({"to": e["name"], "msg": e["msg"], "reply": reply, "lang": lang})
                     del asst["log"][:-30]
+                    if asst["write"]:
+                        write_in_game_chat(reply)
                     if asst["speak"]:
                         speak(reply, lang)
             except Exception as ex:
@@ -663,7 +730,9 @@ class Api(Quiet):
             asst["on"] = q.get("on", ["0"])[0] == "1"
             asst["speak"] = q.get("speak", ["1"])[0] == "1"
             asst["me"] = q.get("me", [""])[0]
-            asst["ptt"] = q.get("ptt", [""])[0]
+            asst["ptt"] = q.get("ptt", ["MAJ"])[0]
+            asst["write"] = q.get("write", ["0"])[0] == "1"
+            asst["chatkey"] = q.get("chat", ["!"])[0] or "!"
             if asst["on"] and not was:
                 asst["seen"] = {e["id"] for e in chat}  # on ne répond qu'aux nouveaux messages
             return self.json({"ok": True})
