@@ -23,6 +23,12 @@ var _chat_scroll: ScrollContainer
 var _chat_sig := ""
 var _ocr_t := 0.0
 var _cfg := ConfigFile.new()
+var _ai_on := false
+var _ai_speak := true
+var _ai_me: LineEdit
+var _ai_ptt: LineEdit
+var _ai_box: VBoxContainer
+var _ai_sig := ""
 var _overlay: Overlay
 var _ov_on := false
 var _ov_primed := false
@@ -92,6 +98,40 @@ func _ready() -> void:
 	_players_box = VBoxContainer.new()
 	_players_box.add_theme_constant_override("separation", 4)
 	pc.add_child(_players_box)
+	var ac := Ui.card(self, "Assistant IA (répond au chat)")
+	var ab := Ui.button("Activer l'assistant", ac)
+	ab.theme_type_variation = "Toggle"
+	ab.toggle_mode = true
+	ab.tooltip_text = "Lit les nouveaux messages du chat et répond par une phrase drôle, dans la langue du message"
+	ab.toggled.connect(func(on: bool) -> void:
+		_ai_on = on
+		_ai_send())
+	var sb := Ui.button("Parler au micro (voix de synthèse)", ac)
+	sb.theme_type_variation = "Toggle"
+	sb.toggle_mode = true
+	sb.button_pressed = _ai_speak
+	sb.toggled.connect(func(on: bool) -> void:
+		_ai_speak = on
+		_ai_send())
+	var ar := HBoxContainer.new()
+	ar.add_theme_constant_override("separation", 8)
+	ac.add_child(ar)
+	_ai_me = LineEdit.new()
+	_ai_me.placeholder_text = "Mon pseudo en jeu"
+	_ai_me.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_ai_me.text_submitted.connect(func(_t: String) -> void: _ai_send())
+	_ai_me.focus_exited.connect(_ai_send)
+	ar.add_child(_ai_me)
+	_ai_ptt = LineEdit.new()
+	_ai_ptt.placeholder_text = "Touche push-to-talk"
+	_ai_ptt.custom_minimum_size.x = 130
+	_ai_ptt.text_submitted.connect(func(_t: String) -> void: _ai_send())
+	_ai_ptt.focus_exited.connect(_ai_send)
+	ar.add_child(_ai_ptt)
+	Ui.hint("Dans le jeu, choisis le micro « Sound-Link-Micro ». Si le jeu demande une touche pour parler, indique-la (ex. v).", ac)
+	_ai_box = VBoxContainer.new()
+	_ai_box.add_theme_constant_override("separation", 4)
+	ac.add_child(_ai_box)
 	var cc := Ui.card(self, "Chat récupéré")
 	var ob := Ui.button("Traduction en jeu (overlay haut droite)", cc)
 	ob.theme_type_variation = "Toggle"
@@ -240,6 +280,9 @@ func _save_regions() -> void:
 
 func _load_regions() -> void:
 	if _cfg.load(CFG) == OK:
+		_ai_me.text = str(_cfg.get_value("assistant", "me", ""))
+		_ai_ptt.text = str(_cfg.get_value("assistant", "ptt", ""))
+		_ai_speak = bool(_cfg.get_value("assistant", "speak", true))
 		for k in _preview.regions:
 			_preview.regions[k] = _cfg.get_value("regions", k, Rect2())
 
@@ -265,6 +308,7 @@ func _on_ocr(ok: bool, body: PackedByteArray) -> void:
 		l.add_theme_color_override("font_color", Ui.C_OK if on else Ui.C_MUTED)
 	if _players_box.get_child_count() == 0:
 		Ui.hint("Aucun joueur détecté (trace le cadre « joueurs »).", _players_box)
+	_ai_show(j.get("assistant", {}))
 	var lines: Array = j.get("chat", [])
 	_overlay_feed(lines)
 	var tr_n := 0
@@ -299,6 +343,35 @@ func _on_ocr(ok: bool, body: PackedByteArray) -> void:
 	_chat_scroll.scroll_vertical = int(_chat_scroll.get_v_scroll_bar().max_value)
 
 
+func _ai_send() -> void:
+	if _ai_me == null:
+		return
+	_cfg.set_value("assistant", "me", _ai_me.text)
+	_cfg.set_value("assistant", "ptt", _ai_ptt.text)
+	_cfg.set_value("assistant", "speak", _ai_speak)
+	_cfg.save(CFG)
+	_call("/assistant?on=%d&speak=%d&me=%s&ptt=%s" % [int(_ai_on), int(_ai_speak), _ai_me.text.uri_encode(), _ai_ptt.text.uri_encode()],
+		HTTPClient.METHOD_POST)
+
+
+func _ai_show(a: Dictionary) -> void:
+	var log: Array = a.get("log", [])
+	var sig := str(log.size()) + (str(log[-1]["reply"]) if not log.is_empty() else "")
+	if sig == _ai_sig:
+		return
+	_ai_sig = sig
+	for ch in _ai_box.get_children():
+		ch.queue_free()
+	for i in range(log.size() - 1, maxi(log.size() - 6, -1), -1):
+		var r := RichTextLabel.new()
+		r.bbcode_enabled = true
+		r.fit_content = true
+		r.scroll_active = false
+		r.add_theme_font_size_override("normal_font_size", 13)
+		r.text = "[color=#8a92a6]%s : %s[/color]\n[color=#34d399]→ %s[/color]" % [_bb(str(log[i]["to"])), _bb(str(log[i]["msg"])), _bb(str(log[i]["reply"]))]
+		_ai_box.add_child(r)
+
+
 func _bb(t: String) -> String:
 	return t.replace("[", "[lb]")
 
@@ -322,6 +395,8 @@ func _overlay_feed(lines: Array) -> void:
 
 
 func _exit_tree() -> void:
+	_ai_on = false
+	_ai_send()
 	stop()
 	if _pid > 0:
 		OS.kill(_pid)

@@ -2,7 +2,7 @@
 """Sound Link : capture d'une fenêtre (X11) et diffusion en JPEG.
  - 127.0.0.1:PORT : API locale de l'appli (GET /windows, POST /share?win=0x..&h=720, POST /share?stop=1)
  - 0.0.0.0:4246   : image de la fenêtre partagée (aperçu du host et clients), 404 si rien n'est partagé."""
-import difflib, io, json, os, re, shutil, subprocess, sys, threading, time
+import base64, difflib, io, json, os, re, shutil, subprocess, sys, tempfile, threading, time, urllib.request, wave
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -502,7 +502,133 @@ def ocr_state():
     gs = sorted((g for g in players.values() if g["n"] >= 2), key=lambda g: -g["t"])
     return {"speaking": [player_name(g) for g in gs if now - g["t"] < 2.5],
             "players": [player_name(g) for g in gs[:20]],
+            "assistant": {"on": asst["on"], "log": asst["log"][-12:]},
             "chat": [{"id": e["id"], "name": e["name"], "msg": e["msg"], "lang": e["lang"], "tr": e["tr"], "done": e["done"]} for e in chat[-200:]]}
+
+
+# ---------------------------------------------------------------- Assistant : répond au chat, par voix dans le micro
+VOICES = {"fr": "fr_FR-siwis-medium", "en": "en_US-lessac-medium", "es": "es_ES-davefx-medium",
+          "de": "de_DE-thorsten-medium", "it": "it_IT-paola-medium", "ru": "ru_RU-denis-medium"}
+VDIR = os.path.expanduser("~/.local/share/sound-link/voices")
+_voices = {}
+tts_lock = threading.Lock()
+asst = {"on": False, "speak": True, "model": "gemma3:4b", "me": "", "ptt": "", "last": 0.0, "seen": set(), "log": [], "busy": False}
+OLLAMA = "http://127.0.0.1:11434/api/chat"
+PROMPT = ("Tu es un joueur sympa et plein d'humour dans un jeu multijoueur. Tu reçois le chat récent et un nouveau message. "
+          "Réponds par UNE seule courte phrase (12 mots maximum), taquine mais bienveillante, dans la langue demandée. "
+          " Réponds normalement à presque tout, y compris aux piques et aux questions. "
+          "Écris exactement SKIP seulement si le message est du charabia, du spam ou une insulte grave. "
+          "Pas de guillemets, pas d'émojis, pas d'explication.\n"
+          "Style (ne recopie jamais ces phrases) : « Merci, la revanche c'est quand tu veux ! » ; "
+          "« Easy? I barely woke up. » ; charabia -> SKIP. Réagis au contenu précis du message.")
+
+
+def tts_wav(text, lang):
+    from piper import PiperVoice
+    name = VOICES.get(lang, VOICES["en"])
+    with tts_lock:
+        if name not in _voices:
+            path = os.path.join(VDIR, name + ".onnx")
+            if not os.path.exists(path):
+                from pathlib import Path
+                from piper.download_voices import download_voice
+                Path(VDIR).mkdir(parents=True, exist_ok=True)
+                download_voice(name, Path(VDIR))
+            _voices[name] = PiperVoice.load(path)
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as w:
+            _voices[name].synthesize_wav(text, w)
+    return buf.getvalue()
+
+
+def press_ptt(down):
+    """Maintient / relâche la touche push-to-talk du jeu (X11 XTEST)."""
+    key = asst["ptt"].strip()
+    if not key:
+        return
+    try:
+        from Xlib import X, XK, display
+        from Xlib.ext import xtest
+        d = display.Display()
+        code = d.keysym_to_keycode(XK.string_to_keysym(key))
+        xtest.fake_input(d, X.KeyPress if down else X.KeyRelease, code)
+        d.sync()
+    except Exception:
+        pass
+
+
+def speak(text, lang):
+    wav = tts_wav(text, lang)
+    f = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+    f.write(wav)
+    f.close()
+    sink = subprocess.run(["pactl", "list", "short", "sinks"], capture_output=True, text=True).stdout
+    cmd = ["paplay"] + (["--device=soundlink_sink"] if "soundlink_sink" in sink else []) + [f.name]
+    press_ptt(True)
+    time.sleep(0.25)
+    try:
+        subprocess.run(cmd, timeout=40)
+    finally:
+        time.sleep(0.15)
+        press_ptt(False)
+        os.unlink(f.name)
+
+
+LANG_NAMES = {"fr": "français", "en": "English", "ru": "русский", "es": "español", "de": "Deutsch", "it": "italiano", "pt": "português"}
+
+
+def ask_model(e, context):
+    lang = LANG_NAMES.get(e.get("lang"), "English")
+    body = {"model": asst["model"], "stream": False, "keep_alive": "10m",
+            "options": {"temperature": 0.8, "num_predict": 48},
+            "messages": [{"role": "system", "content": PROMPT},
+                         {"role": "user", "content": "Chat récent :\n%s\n\nNouveau message de %s : %s\n\nRéponds en %s, une phrase courte (ou SKIP)." % (context, e["name"] or "un joueur", e["msg"], lang)}]}
+    frame = st["frame"]
+    if frame:  # le modèle doit savoir lire les images (gemma3, qwen2.5vl...)
+        try:
+            from PIL import Image
+            im = Image.open(io.BytesIO(frame)).convert("RGB")
+            im.thumbnail((640, 640))
+            b = io.BytesIO()
+            im.save(b, "JPEG", quality=70)
+            body["messages"][1]["images"] = [base64.b64encode(b.getvalue()).decode()]
+        except Exception:
+            pass
+    req = urllib.request.Request(OLLAMA, json.dumps(body).encode(), {"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=60) as r:
+        return json.load(r)["message"]["content"].strip().strip('"«» ')
+
+
+def assistant_loop():
+    while True:
+        time.sleep(1.0)
+        if not asst["on"] or asst["busy"]:
+            continue
+        now = time.time()
+        for e in list(chat):
+            if e["id"] in asst["seen"] or not e.get("done"):
+                continue
+            asst["seen"].add(e["id"])
+            if now - asst["last"] < 15 or len(norm(e["msg"])) < 4:
+                continue
+            if asst["me"] and canon(asst["me"]) and difflib.SequenceMatcher(None, canon(asst["me"]), canon(e["name"])).ratio() > 0.75:
+                continue  # mon propre message
+            asst["busy"] = True
+            try:
+                ctx = "\n".join("%s: %s" % (c["name"] or "?", c["msg"]) for c in chat[-7:-1])
+                reply = ask_model(e, ctx)[:160]
+                if reply and not reply.upper().startswith("SKIP"):
+                    asst["last"] = time.time()
+                    lang = e["lang"] if e["lang"] in VOICES else "en"
+                    asst["log"].append({"to": e["name"], "msg": e["msg"], "reply": reply, "lang": lang})
+                    del asst["log"][:-30]
+                    if asst["speak"]:
+                        speak(reply, lang)
+            except Exception as ex:
+                asst["log"].append({"to": "", "msg": "", "reply": "(erreur : %s)" % str(ex)[:80], "lang": ""})
+            finally:
+                asst["busy"] = False
+            break
 
 
 class Quiet(BaseHTTPRequestHandler):
@@ -533,6 +659,15 @@ class Api(Quiet):
 
     def do_POST(self):
         q = parse_qs(urlparse(self.path).query)
+        if self.path.startswith("/assistant"):
+            was = asst["on"]
+            asst["on"] = q.get("on", ["0"])[0] == "1"
+            asst["speak"] = q.get("speak", ["1"])[0] == "1"
+            asst["me"] = q.get("me", [""])[0]
+            asst["ptt"] = q.get("ptt", [""])[0]
+            if asst["on"] and not was:
+                asst["seen"] = {e["id"] for e in chat}  # on ne répond qu'aux nouveaux messages
+            return self.json({"ok": True})
         if self.path.startswith("/regions"):
             if "clear" in q:
                 chat.clear()
@@ -572,4 +707,5 @@ if __name__ == "__main__":
         pass
     threading.Thread(target=setup_tessdata, daemon=True).start()
     threading.Thread(target=ocr_loop, daemon=True).start()
+    threading.Thread(target=assistant_loop, daemon=True).start()
     ThreadingHTTPServer(("127.0.0.1", API_PORT), Api).serve_forever()
