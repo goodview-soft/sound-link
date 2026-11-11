@@ -120,14 +120,17 @@ def read_lines(img):
     if not _ocr:
         from rapidocr_onnxruntime import RapidOCR
         _ocr.append(RapidOCR())
-    if img.size[1] < 120:
-        img = img.resize((img.size[0] * 2, img.size[1] * 2))
+    from PIL import Image, ImageOps
+    k = 3 if img.size[1] < 160 else 2 if img.size[1] < 400 else 1  # petit texte de jeu : on agrandit
+    if k > 1:
+        img = img.resize((img.size[0] * k, img.size[1] * k), Image.LANCZOS)
+    img = ImageOps.autocontrast(img, cutoff=1)
     res, _ = _ocr[0](np.array(img))
     items = []  # (x, y centre, hauteur, texte) : les boîtes d'une même ligne sont recollées
     for box, text, score in res or []:
         if float(score) >= 0.5 and text.strip():
             ys = [pt[1] for pt in box]
-            items.append((min(pt[0] for pt in box), (min(ys) + max(ys)) / 2, max(ys) - min(ys), text.strip()))
+            items.append((min(pt[0] for pt in box), (min(ys) + max(ys)) / 2, max(ys) - min(ys), text.strip(), float(score)))
     items.sort(key=lambda i: i[1])
     rows = []
     for it in items:
@@ -135,36 +138,58 @@ def read_lines(img):
             rows[-1].append(it)
         else:
             rows.append([it])
-    return [" ".join(i[3] for i in sorted(r)) for r in rows if len(" ".join(i[3] for i in r)) >= 2]
+    out = []
+    for r in rows:
+        r = sorted(r)
+        txt = " ".join(i[3] for i in r)
+        if len(txt) >= 2:
+            out.append((txt, sum(i[4] for i in r) / len(r)))  # (texte, confiance moyenne)
+    return out
 
 
 def update_players(lines, now):
-    for ln in lines:
-        key = next((k for k in players if difflib.SequenceMatcher(None, norm(k), norm(ln)).ratio() >= 0.85), ln)
+    for ln, sc in lines:
+        if sc < 0.75 or len(norm(ln)) < 3:
+            continue
+        key = next((k for k in players if difflib.SequenceMatcher(None, norm(k), norm(ln)).ratio() >= 0.8), ln)
         players[key] = now
 
 
+pending = []  # lignes vues une seule fois : acceptées si relues (évite les lectures parasites)
+
+
 def update_chat(lines, now):
-    """Ajoute seulement les lignes nouvelles : le chat du jeu disparaît, l'historique reste ici."""
+    """Ajoute seulement les lignes nouvelles et stables : le chat du jeu disparaît, l'historique reste ici."""
     recent = [e for e in chat if now - e["seen"] < 25.0][-80:]
-    for ln in lines:
+
+    def same(n, m):
+        return n in m or m in n or difflib.SequenceMatcher(None, n, m).ratio() >= 0.7
+
+    for ln, sc in lines:
         n = norm(ln)
-        if len(n) < 3:
+        if len(n) < 4 or sc < 0.7:
             continue
-        dup = None
-        for e in recent:
-            if n in e["norm"] or e["norm"] in n or difflib.SequenceMatcher(None, n, e["norm"]).ratio() >= 0.82:
-                dup = e
-                break
+        dup = next((e for e in recent if same(n, e["norm"])), None)
         if dup:
             dup["seen"] = now
-            if len(n) > len(dup["norm"]) and dup["norm"] in n:  # ligne d'abord coupée (fondu), maintenant complète
-                dup["text"], dup["norm"] = ln, n
+            if sc > dup["score"] and len(n) >= 0.9 * len(dup["norm"]):  # meilleure lecture de la même ligne
+                dup.update(text=ln, norm=n, score=sc)
             continue
-        e = {"id": chat_next[0], "text": ln, "norm": n, "seen": now}
-        chat_next[0] += 1
-        chat.append(e)
-        recent.append(e)
+        pen = next((p for p in pending if difflib.SequenceMatcher(None, n, p["norm"]).ratio() >= 0.8), None)
+        if pen is None:
+            pending.append({"text": ln, "norm": n, "score": sc, "count": 1, "seen": now})
+            continue
+        pen["count"] += 1
+        pen["seen"] = now
+        if sc > pen["score"]:
+            pen.update(text=ln, norm=n, score=sc)
+        if pen["count"] >= 2:
+            pending.remove(pen)
+            e = {"id": chat_next[0], "text": pen["text"], "norm": pen["norm"], "score": pen["score"], "seen": now}
+            chat_next[0] += 1
+            chat.append(e)
+            recent.append(e)
+    pending[:] = [p for p in pending if now - p["seen"] < 6.0]
     del chat[:-300]
 
 
