@@ -235,19 +235,36 @@ def same_player(a, b):
     return max(difflib.SequenceMatcher(None, ca, cb).ratio(), difflib.SequenceMatcher(None, na, nb).ratio()) >= 0.68
 
 
+def looks_like_name(t, sc):
+    """Un pseudo : lisible, presque que des lettres/chiffres/_, pas du bruit de décor."""
+    t = re.sub(r"^[^\w\[(]+|[^\w\])]+$", "", t.strip())
+    t = " ".join(w for w in t.split() if sum(c.isalnum() for c in w) >= 2)  # lettres isolées = bruit
+    alnum = sum(c.isalnum() or c == "_" for c in t)
+    if sc < 0.65 or alnum < 4 or len(t) > 40 or alnum / max(len(t.replace(" ", "")), 1) < 0.8:
+        return None
+    if max((sum(c.isalnum() or c == "_" for c in w) for w in t.split()), default=0) < 4:
+        return None  # aucun vrai mot
+    for w in t.split():  # un mot mélangeant alphabet latin et cyrillique = bruit
+        if re.search(r"[A-Za-z]", w) and re.search(r"[\u0400-\u04ff]", w):
+            return None
+    return t
+
+
 def update_players(lines, now):
+    """Un pseudo n'est retenu qu'après deux lectures proches (le bruit d'OCR ne se répète pas à l'identique)."""
     for ln, sc in lines:
-        if sc < 0.4 or len(canon(ln)) < 3:
+        ln = looks_like_name(ln, sc)
+        if not ln:
             continue
         g = next((g for g in players.values() if any(same_player(v, ln) for v in g["votes"])), None)
         if g is None:
-            g = {"votes": {}, "t": now}
+            g = {"votes": {}, "t": now, "n": 0}
             players[len(players) + int(now * 1000)] = g
-        g["votes"][ln] = g["votes"].get(ln, 0) + 1  # on affichera la lecture la plus fréquente
+        g["votes"][ln] = g["votes"].get(ln, 0) + 1
+        g["n"] += 1
         g["t"] = now
-    if len(players) > 40:
-        for k in sorted(players, key=lambda k: players[k]["t"])[:-30]:
-            del players[k]
+    for k in [k for k, g in players.items() if (g["n"] < 2 and now - g["t"] > 4.0) or now - g["t"] > 180.0]:
+        del players[k]  # lecture jamais confirmée, ou joueur absent depuis 3 min
 
 
 def player_name(g):
@@ -350,25 +367,43 @@ def update_chat(lines, now):
     def same(n, m):
         return n in m or m in n or difflib.SequenceMatcher(None, n, m).ratio() >= 0.7
 
+    def dup_of(ln, n, pool):
+        """Doublon = même message (et même pseudo, ou pseudo illisible). Comparer le pseudo seul ferait fusionner
+        deux messages courts d'un même joueur."""
+        name, msg = split_chat(ln)
+        mn = norm(msg)
+        for e in pool:
+            en, em = e.get("name", ""), norm(e.get("msg", ""))
+            if len(mn) >= 3 and len(em) >= 3 and name and en and canon(name) != canon(en) \
+                    and difflib.SequenceMatcher(None, canon(name), canon(en)).ratio() < 0.6:
+                continue  # pseudos différents : messages distincts
+            if len(mn) >= 3 and len(em) >= 3:
+                if (min(len(mn), len(em)) >= 6 and (mn in em or em in mn)) or difflib.SequenceMatcher(None, mn, em).ratio() >= 0.78:
+                    return e
+            elif same(n, e["norm"]):
+                return e
+        return None
+
     for ln, sc in lines:
         n = norm(ln)
-        if len(n) < 4 or sc < 0.5:
+        if len(n) < 4 or sc < 0.4:
             continue
-        dup = next((e for e in recent if same(n, e["norm"])), None)
+        dup = dup_of(ln, n, recent)
         if dup:
             dup["seen"] = now
             if sc > dup["score"] and len(n) >= 0.9 * len(dup["norm"]):  # meilleure lecture de la même ligne
                 dup.update(text=ln, norm=n, score=sc)
                 threading.Thread(target=enrich, args=(dup,), daemon=True).start()
             continue
-        pen = next((p for p in pending if difflib.SequenceMatcher(None, n, p["norm"]).ratio() >= 0.8), None)
+        pen = dup_of(ln, n, pending)
         if pen is None:
-            pending.append({"text": ln, "norm": n, "score": sc, "count": 1, "seen": now})
+            nm, ms = split_chat(ln)
+            pending.append({"text": ln, "norm": n, "score": sc, "count": 1, "seen": now, "name": nm, "msg": ms})
             continue
         pen["count"] += 1
         pen["seen"] = now
         if sc > pen["score"]:
-            pen.update(text=ln, norm=n, score=sc)
+            pen.update(text=ln, norm=n, score=sc, name=split_chat(ln)[0], msg=split_chat(ln)[1])
         if pen["count"] >= 2:
             pending.remove(pen)
             e = {"id": chat_next[0], "text": pen["text"], "norm": pen["norm"], "score": pen["score"], "seen": now,
@@ -408,7 +443,7 @@ def ocr_loop():
 
 def ocr_state():
     now = time.time()
-    gs = sorted(players.values(), key=lambda g: -g["t"])
+    gs = sorted((g for g in players.values() if g["n"] >= 2), key=lambda g: -g["t"])
     return {"speaking": [player_name(g) for g in gs if now - g["t"] < 2.5],
             "players": [player_name(g) for g in gs[:20]],
             "chat": [{"id": e["id"], "name": e["name"], "msg": e["msg"], "lang": e["lang"], "tr": e["tr"], "done": e["done"]} for e in chat[-200:]]}
