@@ -131,6 +131,9 @@ var tts_edit: LineEdit
 var tts_labels := []
 var vox_interp_http: HTTPRequest
 var interp_on := false
+var interp_hear := true
+var auto_done := {}
+var vox_auto_http: HTTPRequest
 var interp_lang := "en"
 var interp := {}  # host : ip -> {lang, t}
 var mic_btn_ref: Button
@@ -1153,6 +1156,7 @@ func _start_host() -> void:
 func _start_client() -> void:
 	vox_client_items.clear()
 	vox_seen.clear()
+	auto_done.clear()
 	vox_poll_t = 0.0
 	_vox_rebuild()
 	var ip := ip_edit.text.strip_edges()
@@ -1836,6 +1840,12 @@ func _vox_panel(parent: Node, is_host: bool) -> VBoxContainer:
 			interp_lang = VOX_LANGS[i][1]
 			vox_poll_t = 0.0)
 		ir.add_child(ilo)
+		var hb := _button("Écouter ici", v)
+		hb.theme_type_variation = "Toggle"
+		hb.toggle_mode = true
+		hb.button_pressed = interp_hear
+		hb.tooltip_text = "Entendre la traduction parlée sur le téléphone"
+		hb.toggled.connect(func(on: bool) -> void: interp_hear = on)
 		_hint("Parle dans le micro du téléphone : ta voix est traduite et redite en synthèse dans le micro du PC.", v)
 	var tl := _label("Dire au micro (synthèse vocale)", v)
 	tl.add_theme_font_size_override("font_size", 14)
@@ -1927,10 +1937,10 @@ func _vox_feed(key: String, who: String, samples: PackedFloat32Array, sr: int) -
 		vox_det[key] = VoxDet.new()
 	var seg: PackedByteArray = vox_det[key].feed(samples, sr)
 	if not seg.is_empty():
-		_vox_segment(who, seg, _interp_lang(key, Time.get_ticks_msec() / 1000.0))
+		_vox_segment(who, seg, _interp_lang(key, Time.get_ticks_msec() / 1000.0), key.get_slice(":", 0))
 
 
-func _vox_segment(who: String, pcm: PackedByteArray, ilang := "") -> void:
+func _vox_segment(who: String, pcm: PackedByteArray, ilang := "", src_ip := "") -> void:
 	if vox_pending >= 6:
 		return  # transcription en retard : on abandonne plutôt que d'accumuler
 	vox_pending += 1
@@ -1948,15 +1958,16 @@ func _vox_segment(who: String, pcm: PackedByteArray, ilang := "") -> void:
 		var text := str(j.get("text", "")).strip_edges()
 		if text == "":
 			return
-		if ilang != "":  # interprète : on dit la traduction (ou le texte si déjà dans la langue) dans le micro
-			_tts_direct(str(j.get("tr", "")) if str(j.get("tr", "")) != "" else text, ilang)
 		var dt := Time.get_datetime_dict_from_system()
-		vox_items.append({"id": vox_next, "who": who, "text": text, "tr": str(j.get("tr", "")),
-			"lang": str(j.get("lang", "")), "pcm": pcm,
-			"clock": "%02d:%02d:%02d" % [dt["hour"], dt["minute"], dt["second"]]})
+		var item := {"id": vox_next, "who": who, "text": text, "tr": str(j.get("tr", "")),
+			"lang": str(j.get("lang", "")), "pcm": pcm, "ip": src_ip, "tts": PackedByteArray(),
+			"clock": "%02d:%02d:%02d" % [dt["hour"], dt["minute"], dt["second"]]}
+		vox_items.append(item)
 		vox_next += 1
 		while vox_items.size() > 30:
 			vox_items.pop_front()
+		if ilang != "":  # interprète : on dit la traduction (ou le texte si déjà dans la langue) dans le micro
+			_tts_direct(str(item["tr"]) if str(item["tr"]) != "" else text, ilang, item)
 		_vox_rebuild())
 	h.request_raw("http://127.0.0.1:%d/transcribe?target=%s" % [VOX_PY_PORT, ilang if ilang != "" else vox_target],
 		PackedStringArray(["Content-Type: application/octet-stream"]), HTTPClient.METHOD_POST, pcm)
@@ -2155,6 +2166,7 @@ func _vox_tts_proxy(c: Dictionary, path: String) -> void:
 
 
 func _vox_reply(p: StreamPeerTCP, line: String) -> void:
+	var peer := p.get_connected_host()
 	var path := line.get_slice(" ", 1)
 	var body := PackedByteArray()
 	var ctype := "application/json"
@@ -2162,13 +2174,14 @@ func _vox_reply(p: StreamPeerTCP, line: String) -> void:
 		var list := []
 		for it in vox_items:
 			list.append({"id": it["id"], "who": it["who"], "clock": it["clock"],
-				"text": it["text"], "tr": it["tr"], "lang": it["lang"]})
+				"text": it["text"], "tr": it["tr"], "lang": it["lang"],
+				"mine": it["ip"] == peer, "tts": not it["tts"].is_empty()})
 		body = JSON.stringify(list).to_utf8_buffer()
 	elif path.begins_with("/vox/"):
 		var id := int(path.get_slice("/", 2).get_basename())
 		for it in vox_items:
 			if int(it["id"]) == id:
-				body = _wav_bytes(it["pcm"])
+				body = it["tts"] if path.contains(".tts.") else _wav_bytes(it["pcm"])
 				ctype = "audio/wav"
 	_http_send(p, ctype, body)
 
@@ -2194,6 +2207,16 @@ func _on_vox_list(res: int, code: int, _h: PackedStringArray, body: PackedByteAr
 		return
 	var changed := false
 	for it in j:
+		if typeof(it) == TYPE_DICTIONARY and it.get("mine", false) and it.get("tts", false) \
+				and interp_on and interp_hear and not auto_done.has(int(it["id"])):
+			auto_done[int(it["id"])] = true
+			if vox_auto_http == null:
+				vox_auto_http = HTTPRequest.new()
+				vox_auto_http.timeout = 10.0
+				add_child(vox_auto_http)
+				vox_auto_http.request_completed.connect(_on_vox_auto)
+			if vox_auto_http.get_http_client_status() == HTTPClient.STATUS_DISCONNECTED:
+				vox_auto_http.request("http://%s:%d/vox/%d.tts.wav" % [ip_edit.text.strip_edges(), VOX_PORT, int(it["id"])])
 		if typeof(it) == TYPE_DICTIONARY and not vox_seen.has(int(it["id"])):
 			vox_seen[int(it["id"])] = true
 			vox_client_items.append(it)
@@ -2263,7 +2286,7 @@ func _on_tts(res: int, code: int, _h: PackedStringArray, body: PackedByteArray) 
 
 
 ## Synthèse immédiate dans le micro du PC (bus Board : jeu et/ou clients selon la soundboard).
-func _tts_direct(text: String, lang: String) -> void:
+func _tts_direct(text: String, lang: String, item := {}) -> void:
 	var h := HTTPRequest.new()
 	h.timeout = 60.0
 	add_child(h)
@@ -2274,6 +2297,8 @@ func _tts_direct(text: String, lang: String) -> void:
 		var st := AudioStreamWAV.load_from_buffer(body)
 		if st == null:
 			return
+		if not item.is_empty():
+			item["tts"] = body  # le téléphone de l'interprète pourra l'écouter
 		var pl := AudioStreamPlayer.new()
 		pl.stream = st
 		pl.bus = "Board"
@@ -2283,3 +2308,17 @@ func _tts_direct(text: String, lang: String) -> void:
 		pl.play())
 	h.request_raw("http://127.0.0.1:%d/tts?lang=%s" % [VOX_PY_PORT, lang], PackedStringArray(),
 		HTTPClient.METHOD_POST, text.to_utf8_buffer())
+
+
+func _on_vox_auto(res: int, code: int, _h: PackedStringArray, body: PackedByteArray) -> void:
+	if res != HTTPRequest.RESULT_SUCCESS or code != 200:
+		return
+	var st := AudioStreamWAV.load_from_buffer(body)
+	if st == null:
+		return
+	var pl := AudioStreamPlayer.new()
+	pl.stream = st
+	pl.volume_db = linear_to_db(maxf(volume, 0.0001))
+	add_child(pl)
+	pl.finished.connect(pl.queue_free)
+	pl.play()
