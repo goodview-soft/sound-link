@@ -177,20 +177,41 @@ def _clean(txt):
     return " ".join(toks)
 
 
-def read_lines(img):
-    """Lignes de texte (texte, confiance) : Tesseract si présent (bons espaces), sinon RapidOCR."""
-    global LANGS
-    if not shutil.which("tesseract"):
-        return _read_rapid(img)
-    if LANGS == "eng" and os.path.exists(TESSDIR + "/rus.traineddata") and os.path.isdir(TESSDIR + "/configs"):
-        LANGS = "eng+fra+rus"
+def find_bands(img):
+    """Repère les lignes de texte d'un cadre : pixels clairs ou très colorés (texte, icônes de canal),
+    projetés horizontalement. Renvoie les (y0, y1) de chaque ligne en pixels."""
+    import numpy as np
+    a = np.asarray(img.convert("RGB")).astype(np.int16)
+    mx, mn = a.max(2), a.min(2)
+    lum = (a[:, :, 0] * 3 + a[:, :, 1] * 6 + a[:, :, 2]) // 10
+    bg = np.median(lum)
+    mask = (lum > max(bg + 55, 120)) | (((mx - mn) > 80) & (mx > 120))  # plus clair que le fond, ou couleur vive
+    prof = mask.mean(axis=1)
+    h = len(prof)
+    on = np.convolve(prof > 0.02, np.ones(3), "same") > 0  # comble les trous entre lettres
+    bands, y = [], 0
+    while y < h:
+        if on[y]:
+            y0 = y
+            while y < h and on[y]:
+                y += 1
+            if 7 <= y - y0 <= 45:
+                bands.append((max(y0 - 3, 0), min(y + 3, h)))
+        else:
+            y += 1
+    return bands
+
+
+def _tess(img, psm, langs):
+    """Un appel Tesseract : renvoie [(texte, confiance)] par ligne."""
     from PIL import Image, ImageOps
     k = 3 if img.size[1] < 160 else 2 if img.size[1] < 400 else 1
     if k > 1:
         img = img.resize((img.size[0] * k, img.size[1] * k), Image.LANCZOS)
     buf = io.BytesIO()
     ImageOps.autocontrast(img, cutoff=1).save(buf, "PNG")
-    out = subprocess.run(["tesseract", "stdin", "stdout", "--psm", "6", "-l", LANGS] + (["--tessdata-dir", TESSDIR] if LANGS != "eng" else []) + ["tsv"],
+    out = subprocess.run(["tesseract", "stdin", "stdout", "--psm", str(psm), "-l", langs]
+                         + (["--tessdata-dir", TESSDIR] if langs != "eng" else []) + ["tsv"],
                          input=buf.getvalue(), capture_output=True, timeout=15).stdout.decode("utf-8", "replace")
     rows = {}
     for ln in out.splitlines()[1:]:
@@ -205,6 +226,41 @@ def read_lines(img):
         if len(txt) >= 2 and not norm(txt).startswith(IGNORE):
             res.append((txt, sum(w[2] for w in r) / len(r)))
     return res
+
+
+def _cyr_ratio(t):
+    letters = [c for c in t if c.isalpha()]
+    return sum("\u0400" <= c <= "\u04ff" for c in letters) / len(letters) if letters else 0.0
+
+
+def read_lines(img, split=True):
+    """Lignes de texte (texte, confiance) : Tesseract si présent (bons espaces), sinon RapidOCR.
+    Chaque ligne repérée est lue seule, en anglais/français d'abord ; le russe seulement si c'est peu fiable
+    (évite de lire les pseudos latins en lettres cyrilliques)."""
+    global LANGS
+    if not shutil.which("tesseract"):
+        return _read_rapid(img)
+    has_ru = os.path.exists(TESSDIR + "/rus.traineddata") and os.path.isdir(TESSDIR + "/configs")
+    latin = "eng+fra" if has_ru else "eng"
+    if split:
+        try:
+            bands = find_bands(img)
+        except Exception:
+            bands = []
+        if 1 <= len(bands) <= 14:
+            res = []
+            for y0, y1 in bands:
+                band = img.crop((0, y0, img.size[0], y1))
+                best = _tess(band, 7, latin)
+                if has_ru:
+                    ru = _tess(band, 7, "rus+eng")
+                    # le russe n'est retenu que si le MESSAGE est bien en cyrillique et mieux lu : un pseudo latin
+                    # lu en cyrillique ne doit pas faire basculer toute la ligne
+                    if ru and _cyr_ratio(split_chat(ru[0][0])[1]) >= 0.7 and (not best or ru[0][1] > best[0][1] + 0.03):
+                        best = ru
+                res += best
+            return res
+    return _tess(img, 6, "eng+fra+rus" if has_ru else "eng")
 
 
 _FOLD = {}
