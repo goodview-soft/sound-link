@@ -2,7 +2,7 @@
 """Sound Link : capture d'une fenêtre (X11) et diffusion en JPEG.
  - 127.0.0.1:PORT : API locale de l'appli (GET /windows, POST /share?win=0x..&h=720, POST /share?stop=1)
  - 0.0.0.0:4246   : image de la fenêtre partagée (aperçu du host et clients), 404 si rien n'est partagé."""
-import difflib, io, json, os, re, subprocess, sys, threading, time
+import difflib, io, json, os, re, shutil, subprocess, sys, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -109,13 +109,14 @@ players = {}  # pseudo -> dernier instant vu
 chat = []     # {id, text, norm, seen}
 chat_next = [1]
 _ocr = []
+LANGS = "eng+fra" if os.path.exists("/usr/share/tesseract-ocr/5/tessdata/fra.traineddata") or os.path.exists("/usr/share/tesseract-ocr/4.00/tessdata/fra.traineddata") else "eng"
 
 
 def norm(t):
     return re.sub(r"[^0-9a-zàâçéèêëîïôûùüÿñæœ]+", "", t.lower())
 
 
-def read_lines(img):
+def _read_rapid(img):
     import numpy as np
     if not _ocr:
         from rapidocr_onnxruntime import RapidOCR
@@ -147,9 +148,47 @@ def read_lines(img):
     return out
 
 
+IGNORE = ("sendto", "envoyera")  # champ de saisie du chat
+
+
+def _clean(txt):
+    """Retire les pictogrammes lus comme des petits mots au début de la ligne (icône du canal)."""
+    toks = txt.split()
+    while len(toks) > 1 and ((len(toks[0]) <= 3 and re.search(r"[^\w]", toks[0])) or (len(toks[0]) == 1 and toks[0] not in "IAa")):
+        toks.pop(0)
+    return " ".join(toks)
+
+
+def read_lines(img):
+    """Lignes de texte (texte, confiance) : Tesseract si présent (bons espaces), sinon RapidOCR."""
+    if not shutil.which("tesseract"):
+        return _read_rapid(img)
+    from PIL import Image, ImageOps
+    k = 3 if img.size[1] < 160 else 2 if img.size[1] < 400 else 1
+    if k > 1:
+        img = img.resize((img.size[0] * k, img.size[1] * k), Image.LANCZOS)
+    buf = io.BytesIO()
+    ImageOps.autocontrast(img, cutoff=1).save(buf, "PNG")
+    out = subprocess.run(["tesseract", "stdin", "stdout", "--psm", "6", "-l", LANGS, "tsv"],
+                         input=buf.getvalue(), capture_output=True, timeout=15).stdout.decode("utf-8", "replace")
+    rows = {}
+    for ln in out.splitlines()[1:]:
+        c = ln.split("\t")
+        if len(c) < 12 or not c[11].strip() or float(c[10]) < 0:
+            continue
+        rows.setdefault(tuple(c[2:5]), []).append((int(c[6]), c[11].strip(), float(c[10]) / 100.0))
+    res = []
+    for r in rows.values():
+        r.sort()
+        txt = _clean(" ".join(w[1] for w in r))
+        if len(txt) >= 2 and not norm(txt).startswith(IGNORE):
+            res.append((txt, sum(w[2] for w in r) / len(r)))
+    return res
+
+
 def update_players(lines, now):
     for ln, sc in lines:
-        if sc < 0.75 or len(norm(ln)) < 3:
+        if sc < 0.5 or len(norm(ln)) < 3:
             continue
         key = next((k for k in players if difflib.SequenceMatcher(None, norm(k), norm(ln)).ratio() >= 0.8), ln)
         players[key] = now
@@ -167,7 +206,7 @@ def update_chat(lines, now):
 
     for ln, sc in lines:
         n = norm(ln)
-        if len(n) < 4 or sc < 0.7:
+        if len(n) < 4 or sc < 0.5:
             continue
         dup = next((e for e in recent if same(n, e["norm"])), None)
         if dup:
