@@ -10,3 +10,7 @@ micro virtuel « Sound-Link-Micro » du host.
 - Toutes les versions : [releases](https://github.com/goodview-soft/sound-link/releases).
 - Publier une version : `./release.sh 1.1.0 "notes"` — l'appli propose ensuite la mise à jour
   (téléchargement du `.pck` seul ; nouveau programme complet si la version de Godot change).
+
+## Voix (Soundboard → Voix)
+Nécessite sur le PC host : `pip install openai-whisper argostranslate piper-tts` (lancer via `sound-link.sh`).
+Reconnaissance, traduction en français et synthèse vocale : tout est local, sans API.

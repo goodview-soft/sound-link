@@ -94,6 +94,46 @@ var upd_lbl: Label
 var upd_btn: Button
 var upd_http: HTTPRequest
 var upd_info := {}
+const VOX_PORT := 4244
+const VOX_PY_PORT := 4245
+const VOX_LANGS := [["Français", "fr"], ["English", "en"], ["Español", "es"], ["Deutsch", "de"], ["Italiano", "it"], ["Русский", "ru"]]
+var vox_lists := []  # [VBoxContainer, is_host]
+var vox_items := []  # host : voix détectées {id, who, clock, text, tr, lang, pcm}
+var vox_client_items := []  # client : liste reçue du host
+var vox_seen := {}
+var vox_next := 1
+var vox_on := false
+var vox_ready := false
+var vox_pid := -1
+var vox_target := "fr"
+var vox_src_game := true
+var vox_src_mics := true
+var vox_det := {}
+var vox_pending := 0
+var vox_cap := AudioEffectCapture.new()
+var vox_player: AudioStreamPlayer
+var vox_cplayer: AudioStreamPlayer
+var vox_tcp := TCPServer.new()
+var vox_conns := []
+var vox_labels := []
+var vox_toggle: Button
+var vox_stat_http: HTTPRequest
+var vox_list_http: HTTPRequest
+var vox_clip_http: HTTPRequest
+var vox_poll_t := 0.0
+var vox_since := 0.0
+var vox_stat_t := 0.0
+var vox_clip_id := 0
+var tts_lang := "fr"
+var tts_http: HTTPRequest
+var tts_bus := "Board"
+var tts_edit: LineEdit
+var tts_labels := []
+var vox_interp_http: HTTPRequest
+var interp_on := false
+var interp_lang := "en"
+var interp := {}  # host : ip -> {lang, t}
+var mic_btn_ref: Button
 
 
 # ---------------------------------------------------------------- Réception d'un flux
@@ -201,6 +241,68 @@ class RxStream:
 			player.queue_free()
 		player = null
 		playback = null
+
+
+## Détecteur de voix (énergie + hystérésis) : découpe un flux en phrases, PCM 16 kHz mono s16.
+class VoxDet:
+	var floor_level := 0.004
+	var active := false
+	var pcm := PackedByteArray()
+	var pre := PackedByteArray()
+	var voiced := 0.0
+	var quiet := 0.0
+
+	func feed(samples: PackedFloat32Array, sr: int) -> PackedByteArray:
+		var n := samples.size()
+		var none := PackedByteArray()
+		if n == 0 or sr < 8000:
+			return none
+		var ss := 0.0
+		for v in samples:
+			ss += v * v
+		var rms := sqrt(ss / n)
+		var d := float(n) / sr
+		var ratio := float(sr) / 16000.0
+		var cnt := int(n / ratio)
+		var k := maxi(int(ratio), 1)
+		var chunk := PackedByteArray()
+		chunk.resize(cnt * 2)
+		for j in cnt:
+			var idx := int(j * ratio)
+			var a := 0.0
+			var m := 0
+			while m < k and idx + m < n:
+				a += samples[idx + m]
+				m += 1
+			chunk.encode_s16(j * 2, int(clampf(a / maxf(m, 1), -1.0, 1.0) * 32767.0))
+		var loud := rms > maxf(0.012, floor_level * 3.0)
+		if not active:
+			if loud:
+				voiced += d
+			else:
+				voiced = maxf(voiced - d, 0.0)
+				floor_level = lerpf(floor_level, rms, 0.02)
+			pre.append_array(chunk)
+			if pre.size() > 8000:
+				pre = pre.slice(pre.size() - 8000)
+			if voiced >= 0.06:
+				active = true
+				pcm = pre.duplicate()
+				quiet = 0.0
+			return none
+		pcm.append_array(chunk)
+		quiet = 0.0 if loud else quiet + d
+		var secs := pcm.size() / 32000.0
+		if quiet >= 0.35 or secs >= 6.0:
+			active = false
+			voiced = 0.0
+			pre = PackedByteArray()
+			var out := pcm
+			pcm = PackedByteArray()
+			if secs - quiet < 0.3:
+				return none
+			return out.slice(0, out.size() - int(maxf(quiet - 0.15, 0.0) * 16000.0) * 2)
+		return none
 
 
 # ---------------------------------------------------------------- Spectre d'un bus
@@ -413,6 +515,23 @@ func _ready() -> void:
 	mic_gain = cfg.get_value("client", "mic_gain", 1.0)
 	board_to_game = cfg.get_value("board", "game", true)
 	board_to_clients = cfg.get_value("board", "clients", false)
+	vox_target = cfg.get_value("vox", "target", "fr")
+	tts_lang = cfg.get_value("vox", "tts_lang", "fr")
+	vox_src_game = cfg.get_value("vox", "game", true)
+	vox_src_mics = cfg.get_value("vox", "mics", true)
+	vox_stat_http = HTTPRequest.new()
+	vox_list_http = HTTPRequest.new()
+	vox_clip_http = HTTPRequest.new()
+	for h in [vox_stat_http, vox_list_http, vox_clip_http]:
+		h.timeout = 6.0
+		add_child(h)
+	vox_stat_http.request_completed.connect(_on_vox_status)
+	vox_list_http.request_completed.connect(_on_vox_list)
+	vox_clip_http.request_completed.connect(_on_vox_clip)
+	tts_http = HTTPRequest.new()
+	tts_http.timeout = 90.0
+	add_child(tts_http)
+	tts_http.request_completed.connect(_on_tts)
 	_build_ui()
 	_set_mode(cfg.get_value("app", "mode", "client"))
 	_check_update()
@@ -437,6 +556,10 @@ func _save() -> void:
 	cfg.set_value("client", "mic_gain", mic_gain)
 	cfg.set_value("board", "game", board_to_game)
 	cfg.set_value("board", "clients", board_to_clients)
+	cfg.set_value("vox", "target", vox_target)
+	cfg.set_value("vox", "tts_lang", tts_lang)
+	cfg.set_value("vox", "game", vox_src_game)
+	cfg.set_value("vox", "mics", vox_src_mics)
 	cfg.save(CFG_PATH)
 
 
@@ -635,6 +758,7 @@ func _build_ui() -> void:
 	mrow.add_theme_constant_override("separation", 10)
 	cm.add_child(mrow)
 	var mic_btn := _icon_btn("mic" if send_mic else "mic_off", mrow)
+	mic_btn_ref = mic_btn
 	mic_btn.toggle_mode = true
 	mic_btn.button_pressed = send_mic
 	var mlab := _label("Micro vers le PC", mrow)
@@ -1021,11 +1145,16 @@ func _start_host() -> void:
 		AudioServer.output_device = VSINK
 	vsink_lbl.text = "Micros → « Sound-Link-Micro »" if vsink_ok else "Micro virtuel absent : lancer via sound-link.sh"
 	seq = 0
+	vox_tcp.listen(VOX_PORT)
 	running = true
 	_set_run_btn(host_btn, true)
 
 
 func _start_client() -> void:
+	vox_client_items.clear()
+	vox_seen.clear()
+	vox_poll_t = 0.0
+	_vox_rebuild()
 	var ip := ip_edit.text.strip_edges()
 	if not ip.is_valid_ip_address():
 		ip = IP.resolve_hostname(ip, IP.TYPE_IPV4)
@@ -1051,6 +1180,9 @@ func _stop() -> void:
 		udp.put_packet("BYE".to_ascii_buffer())
 	running = false
 	udp.close()
+	_vox_stop()
+	vox_tcp.stop()
+	vox_conns.clear()
 	_stop_capture()
 	if rx:
 		rx.free_player()
@@ -1127,6 +1259,8 @@ func _process(delta: float) -> void:
 	var peaks := Vector2.ZERO
 	if running:
 		peaks = _host_process(now) if mode == "host" else _client_process(now, delta)
+		if mode == "client":
+			_vox_client_tick(now)
 	level_l = maxf(level_l * 0.88, peaks.x)
 	level_r = maxf(level_r * 0.88, peaks.y)
 	meter.set_levels(sqrt(level_l), sqrt(level_r))
@@ -1143,6 +1277,8 @@ func _host_process(now: float) -> Vector2:
 		if pkt.size() > 12 and pkt.slice(0, 4).get_string_from_ascii() == MIC_TAG:
 			var c: Dictionary = clients[key] if clients.has(key) else _add_client(key, ip, port, ip, now)
 			c["t"] = now
+			if vox_ready and vox_src_mics and not c["muted"]:
+				_vox_feed_mic(key, c["name"].text, pkt)
 			if c["rx"] == null:
 				c["rx"] = RxStream.new(self, false, 4, c["bus"])
 			c["rx"].receive(pkt, now)
@@ -1162,10 +1298,12 @@ func _host_process(now: float) -> Vector2:
 		if now - clients[k]["t"] > TIMEOUT:
 			_remove_client(k)
 
+	_vox_serve(now)
+	_vox_tick(now)
 	# Micros reçus -> sortie (micro virtuel)
 	for c in clients.values():
 		var idx := AudioServer.get_bus_index(c["bus"])
-		AudioServer.set_bus_mute(idx, c["muted"] or not vsink_ok)
+		AudioServer.set_bus_mute(idx, c["muted"] or not vsink_ok or _interp_lang(c["ip"], now) != "")
 		var talking := false
 		var r: RxStream = c["rx"]
 		if r:
@@ -1186,11 +1324,20 @@ func _host_process(now: float) -> Vector2:
 		pkt.encode_u32(4, rate)
 		seq = (seq + 1) & 0xFFFFFFFF
 		var o := 8
-		var bf := _board_frames()
+		var bf := _drain_cap(board_cap, board_to_clients)
+		var vf := _drain_cap(vox_cap, true)  # voix détectées rejouées sur les clients
+		if vox_ready and vox_src_game:
+			var gm := PackedFloat32Array()
+			gm.resize(frames.size())
+			for j in frames.size():
+				gm[j] = (frames[j].x + frames[j].y) * 0.5 * host_gain
+			_vox_feed("game", "Jeu", gm, rate)
 		for j in frames.size():
 			var f := frames[j] * host_gain
 			if j < bf.size():
 				f += bf[j]  # soundboard partagée avec les clients
+			if j < vf.size():
+				f += vf[j]
 			var l := clampf(f.x, -1.0, 1.0)
 			var r := clampf(f.y, -1.0, 1.0)
 			pl = maxf(pl, absf(l))
@@ -1434,18 +1581,35 @@ func _board_card(parent: Node, bus: String) -> void:
 			DirAccess.make_dir_recursive_absolute(_sounds_dir())
 			OS.shell_open(_sounds_dir()))
 	_icon_btn("refresh", sbh).pressed.connect(_build_board)
+	var tabs := HBoxContainer.new()
+	tabs.add_theme_constant_override("separation", 8)
+	sb.add_child(tabs)
+	var grp := ButtonGroup.new()
+	var sons := VBoxContainer.new()
+	sons.add_theme_constant_override("separation", 12)
+	sb.add_child(sons)
+	var voix := _vox_panel(sb, bus == "Board")
+	voix.visible = false
+	for tb in [["Sons", sons], ["Voix", voix]]:
+		var t := _button(tb[0], tabs)
+		t.theme_type_variation = "Toggle"
+		t.toggle_mode = true
+		t.button_group = grp
+		t.button_pressed = tb[0] == "Sons"
+		t.size_flags_horizontal = SIZE_EXPAND_FILL
+		t.toggled.connect(func(on: bool) -> void: tb[1].visible = on)
 	var grid := GridContainer.new()
 	grid.columns = 3
 	grid.add_theme_constant_override("h_separation", 8)
 	grid.add_theme_constant_override("v_separation", 8)
-	sb.add_child(grid)
-	_slider_line(sb, Icon.new("speaker", 22, C_MUTED), 0, 150, board_vol * 100.0, 80, func(x: float) -> String:
+	sons.add_child(grid)
+	_slider_line(sons, Icon.new("speaker", 22, C_MUTED), 0, 150, board_vol * 100.0, 80, func(x: float) -> String:
 		board_vol = x / 100.0
 		return "%d%%" % roundi(x))
 	if bus == "Board":  # host : où envoyer la soundboard
 		var dr := HBoxContainer.new()
 		dr.add_theme_constant_override("separation", 8)
-		sb.add_child(dr)
+		sons.add_child(dr)
 		var dl := _label("Envoyer vers", dr)
 		dl.add_theme_color_override("font_color", C_MUTED)
 		dl.add_theme_font_size_override("font_size", 13)
@@ -1471,6 +1635,7 @@ const BOARD_SOUNDS := ["Tir", "Rafale", "Tir lointain", "Sniper", "Explosion", "
 
 func _build_board() -> void:
 	_make_bus("Board", [board_cap])
+	AudioServer.set_bus_mute(_make_bus("Vox", [vox_cap]), true)  # capturé pour les clients, jamais dans le jeu
 	_apply_board_route()
 	_ensure_capture()
 	var items := []
@@ -1600,11 +1765,521 @@ func _apply_board_route() -> void:
 		AudioServer.set_bus_mute(bi, not board_to_game)  # la capture marche même bus coupé
 
 
-func _board_frames() -> PackedVector2Array:
-	if not board_to_clients:
-		board_cap.clear_buffer()
+func _drain_cap(cap: AudioEffectCapture, on: bool) -> PackedVector2Array:
+	if not on:
+		cap.clear_buffer()
 		return PackedVector2Array()
-	var av := board_cap.get_frames_available()
+	var av := cap.get_frames_available()
 	if av > FRAMES_PER_PACKET * 3:
-		board_cap.get_buffer(av - FRAMES_PER_PACKET)  # retard accumulé : on le jette
-	return board_cap.get_buffer(mini(FRAMES_PER_PACKET, board_cap.get_frames_available()))
+		cap.get_buffer(av - FRAMES_PER_PACKET)  # retard accumulé : on le jette
+	return cap.get_buffer(mini(FRAMES_PER_PACKET, cap.get_frames_available()))
+
+
+# ---------------------------------------------------------------- Voix détectées + traduction
+
+func _vox_panel(parent: Node, is_host: bool) -> VBoxContainer:
+	var v := VBoxContainer.new()
+	v.add_theme_constant_override("separation", 10)
+	parent.add_child(v)
+	if is_host:
+		var r1 := HBoxContainer.new()
+		r1.add_theme_constant_override("separation", 8)
+		v.add_child(r1)
+		var tg := _button("Détection des voix", r1)
+		tg.theme_type_variation = "Toggle"
+		tg.toggle_mode = true
+		tg.size_flags_horizontal = SIZE_EXPAND_FILL
+		tg.tooltip_text = "Transcrit et traduit les voix (whisper local)"
+		tg.toggled.connect(func(on: bool) -> void:
+			if on:
+				_vox_start()
+			else:
+				_vox_stop())
+		vox_toggle = tg
+		var r2 := HBoxContainer.new()
+		r2.add_theme_constant_override("separation", 8)
+		v.add_child(r2)
+		for opt in [["Jeu", "game"], ["Micros", "mics"]]:
+			var t := _button(opt[0], r2)
+			t.theme_type_variation = "Toggle"
+			t.toggle_mode = true
+			t.button_pressed = vox_src_game if opt[1] == "game" else vox_src_mics
+			t.toggled.connect(func(on: bool) -> void:
+				if opt[1] == "game":
+					vox_src_game = on
+				else:
+					vox_src_mics = on)
+		var st := _hint("", v)
+		vox_labels.append(st)
+	else:
+		_hint("Phrases détectées par le host : touche-en une pour l'écouter ici.", v)
+	if not is_host:
+		var ir := HBoxContainer.new()
+		ir.add_theme_constant_override("separation", 8)
+		v.add_child(ir)
+		var itg := _button("Voix → TTS", ir)
+		itg.theme_type_variation = "Toggle"
+		itg.toggle_mode = true
+		itg.size_flags_horizontal = SIZE_EXPAND_FILL
+		itg.tooltip_text = "Tu parles dans le micro du téléphone : le PC traduit et le dit à voix de synthèse dans le micro"
+		itg.toggled.connect(func(on: bool) -> void:
+			interp_on = on
+			vox_poll_t = 0.0
+			if on and mic_btn_ref and not mic_btn_ref.button_pressed:
+				mic_btn_ref.button_pressed = true)
+		var ilo := OptionButton.new()
+		for i in VOX_LANGS.size():
+			ilo.add_item("→ " + VOX_LANGS[i][0])
+			if VOX_LANGS[i][1] == interp_lang:
+				ilo.select(i)
+		ilo.item_selected.connect(func(i: int) -> void:
+			interp_lang = VOX_LANGS[i][1]
+			vox_poll_t = 0.0)
+		ir.add_child(ilo)
+		_hint("Parle dans le micro du téléphone : ta voix est traduite et redite en synthèse dans le micro du PC.", v)
+	var tl := _label("Dire au micro (synthèse vocale)", v)
+	tl.add_theme_font_size_override("font_size", 14)
+	var tr1 := HBoxContainer.new()
+	tr1.add_theme_constant_override("separation", 8)
+	v.add_child(tr1)
+	var te := LineEdit.new()
+	te.placeholder_text = "Texte à dire…"
+	te.size_flags_horizontal = SIZE_EXPAND_FILL
+	tr1.add_child(te)
+	var tlo := OptionButton.new()
+	for i in VOX_LANGS.size():
+		tlo.add_item(VOX_LANGS[i][0])
+		if VOX_LANGS[i][1] == tts_lang:
+			tlo.select(i)
+	tlo.item_selected.connect(func(i: int) -> void: tts_lang = VOX_LANGS[i][1])
+	tr1.add_child(tlo)
+	var tb := _button("Parler", tr1)
+	var tst := _hint("", v)
+	tts_labels.append(tst)
+	var say := func() -> void:
+		_tts_say(te.text, "Board" if is_host else "Capture", is_host)
+		te.text = ""
+	tb.pressed.connect(say)
+	te.text_submitted.connect(func(_t: String) -> void: say.call())
+	var list := VBoxContainer.new()
+	list.add_theme_constant_override("separation", 6)
+	v.add_child(list)
+	vox_lists.append([list, is_host])
+	return v
+
+
+func _vox_set_status(t: String) -> void:
+	for l in vox_labels:
+		if is_instance_valid(l):
+			l.text = t
+
+
+func _vox_rebuild() -> void:
+	for lb in vox_lists:
+		var list: VBoxContainer = lb[0]
+		for ch in list.get_children():
+			ch.queue_free()
+		var src: Array = vox_items if lb[1] else vox_client_items
+		for i in range(src.size() - 1, -1, -1):  # plus récent en haut
+			_vox_row(list, src[i], lb[1])
+		if src.is_empty():
+			var e := _hint("Aucune voix pour l'instant.", list)
+			e.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+
+
+func _vox_row(list: VBoxContainer, it: Dictionary, is_host: bool) -> void:
+	var t := "%s · %s\n« %s »" % [it["who"], it["clock"], it["text"]]
+	if str(it["tr"]) != "":
+		t += "\n→ " + str(it["tr"])
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 6)
+	list.add_child(row)
+	var b := _button(t, row)
+	b.alignment = HORIZONTAL_ALIGNMENT_LEFT
+	b.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	b.custom_minimum_size.y = 64
+	b.size_flags_horizontal = SIZE_EXPAND_FILL
+	if is_host:
+		b.tooltip_text = "Écouter sur le PC"
+		b.pressed.connect(_vox_play_pc.bind(it))
+		var tb := _button("Tél.", row)
+		tb.tooltip_text = "Envoyer sur le téléphone (clients)"
+		tb.pressed.connect(_vox_play_host.bind(it))
+	else:
+		b.pressed.connect(_vox_fetch.bind(int(it["id"])))
+
+
+func _vox_feed_mic(key: String, who: String, pkt: PackedByteArray) -> void:
+	var n := (pkt.size() - 12) / 2
+	if n <= 0:
+		return
+	var sm := PackedFloat32Array()
+	sm.resize(n)
+	var o := 12
+	for i in n:
+		sm[i] = pkt.decode_s16(o) / 32768.0
+		o += 2
+	_vox_feed(key, who, sm, pkt.decode_u32(8))
+
+
+func _vox_feed(key: String, who: String, samples: PackedFloat32Array, sr: int) -> void:
+	if not vox_det.has(key):
+		vox_det[key] = VoxDet.new()
+	var seg: PackedByteArray = vox_det[key].feed(samples, sr)
+	if not seg.is_empty():
+		_vox_segment(who, seg, _interp_lang(key, Time.get_ticks_msec() / 1000.0))
+
+
+func _vox_segment(who: String, pcm: PackedByteArray, ilang := "") -> void:
+	if vox_pending >= 6:
+		return  # transcription en retard : on abandonne plutôt que d'accumuler
+	vox_pending += 1
+	var h := HTTPRequest.new()
+	h.timeout = 60.0
+	add_child(h)
+	h.request_completed.connect(func(res: int, code: int, _hd: PackedStringArray, body: PackedByteArray) -> void:
+		vox_pending -= 1
+		h.queue_free()
+		if res != HTTPRequest.RESULT_SUCCESS or code != 200:
+			return
+		var j: Variant = JSON.parse_string(body.get_string_from_utf8())
+		if typeof(j) != TYPE_DICTIONARY:
+			return
+		var text := str(j.get("text", "")).strip_edges()
+		if text == "":
+			return
+		if ilang != "":  # interprète : on dit la traduction (ou le texte si déjà dans la langue) dans le micro
+			_tts_direct(str(j.get("tr", "")) if str(j.get("tr", "")) != "" else text, ilang)
+		var dt := Time.get_datetime_dict_from_system()
+		vox_items.append({"id": vox_next, "who": who, "text": text, "tr": str(j.get("tr", "")),
+			"lang": str(j.get("lang", "")), "pcm": pcm,
+			"clock": "%02d:%02d:%02d" % [dt["hour"], dt["minute"], dt["second"]]})
+		vox_next += 1
+		while vox_items.size() > 30:
+			vox_items.pop_front()
+		_vox_rebuild())
+	h.request_raw("http://127.0.0.1:%d/transcribe?target=%s" % [VOX_PY_PORT, ilang if ilang != "" else vox_target],
+		PackedStringArray(["Content-Type: application/octet-stream"]), HTTPClient.METHOD_POST, pcm)
+
+
+func _vox_spawn() -> void:
+	if vox_pid > 0 or FileAccess.file_exists("/.flatpak-info"):
+		return  # flatpak : le moteur est lancé par sound-link.sh, hors du bac à sable
+	var f := FileAccess.open("res://vox.py", FileAccess.READ)
+	if f:
+		var w := FileAccess.open("user://vox.py", FileAccess.WRITE)
+		w.store_string(f.get_as_text())
+		w.close()
+		vox_pid = OS.create_process("python3", [OS.get_user_data_dir().path_join("vox.py"), str(VOX_PY_PORT), "small"])
+		if vox_pid <= 0:
+			vox_pid = -1
+
+
+func _vox_start() -> void:
+	if vox_on:
+		return
+	# Moteur lancé par sound-link.sh (hors flatpak) ; sinon on tente de le lancer nous-mêmes.
+	_vox_spawn()
+	vox_on = true
+	vox_ready = false
+	vox_stat_t = 0.0
+	vox_since = Time.get_ticks_msec() / 1000.0
+	_vox_set_status("Chargement du modèle de reconnaissance…")
+
+
+func _vox_stop() -> void:
+	if vox_pid > 0:
+		OS.kill(vox_pid)
+	vox_pid = -1
+	vox_on = false
+	vox_ready = false
+	vox_det.clear()
+	if is_instance_valid(vox_toggle):
+		vox_toggle.set_pressed_no_signal(false)
+	_vox_set_status("")
+
+
+func _vox_tick(now: float) -> void:
+	if not vox_on or now < vox_stat_t:
+		return
+	vox_stat_t = now + (1.5 if not vox_ready else 6.0)
+	if not vox_ready and now - vox_since > 90.0:
+		_vox_stop()
+		_vox_set_status("Moteur vocal introuvable : lancer via sound-link.sh (python3 + openai-whisper).")
+		return
+	vox_stat_http.request("http://127.0.0.1:%d/" % VOX_PY_PORT)
+
+
+func _on_vox_status(res: int, code: int, _h: PackedStringArray, body: PackedByteArray) -> void:
+	if not vox_on or res != HTTPRequest.RESULT_SUCCESS or code != 200:
+		return
+	var j: Variant = JSON.parse_string(body.get_string_from_utf8())
+	if typeof(j) != TYPE_DICTIONARY:
+		return
+	if str(j.get("error", "")) != "":
+		_vox_stop()
+		_vox_set_status("Erreur : " + str(j["error"]))
+		return
+	vox_ready = bool(j.get("ready", false))
+	if vox_ready:
+		_vox_set_status("● Écoute des voix (%s) · traduction en français" % str(j.get("device", "")).to_upper())
+
+
+func _pcm_stream(pcm: PackedByteArray) -> AudioStreamWAV:
+	var st := AudioStreamWAV.new()
+	st.format = AudioStreamWAV.FORMAT_16_BITS
+	st.mix_rate = 16000
+	st.stereo = false
+	st.data = pcm
+	return st
+
+
+func _vox_play_pc(it: Dictionary) -> void:
+	var h := HTTPRequest.new()
+	add_child(h)
+	h.request_completed.connect(func(_r: int, _c: int, _hd: PackedStringArray, _b: PackedByteArray) -> void: h.queue_free())
+	h.request_raw("http://127.0.0.1:%d/play" % VOX_PY_PORT, PackedStringArray(), HTTPClient.METHOD_POST, it["pcm"])
+
+
+func _vox_play_host(it: Dictionary) -> void:
+	if vox_player == null:
+		vox_player = AudioStreamPlayer.new()
+		vox_player.bus = "Vox"
+		add_child(vox_player)
+	vox_player.stream = _pcm_stream(it["pcm"])
+	vox_player.volume_db = linear_to_db(maxf(board_vol, 0.0001))
+	vox_player.play()
+
+
+func _wav_bytes(pcm: PackedByteArray) -> PackedByteArray:
+	var h := StreamPeerBuffer.new()
+	h.put_data("RIFF".to_ascii_buffer())
+	h.put_u32(36 + pcm.size())
+	h.put_data("WAVEfmt ".to_ascii_buffer())
+	h.put_u32(16)
+	h.put_u16(1)
+	h.put_u16(1)
+	h.put_u32(16000)
+	h.put_u32(32000)
+	h.put_u16(2)
+	h.put_u16(16)
+	h.put_data("data".to_ascii_buffer())
+	h.put_u32(pcm.size())
+	h.put_data(pcm)
+	return h.data_array
+
+
+## Mini serveur HTTP (host) : /vox.json = liste, /vox/<id>.wav = clip, pour les clients.
+func _vox_interp_set(ip: String, lang: String, now: float) -> void:
+	if lang == "off" or lang == "":
+		interp.erase(ip)
+		return
+	interp[ip] = {"lang": lang, "t": now}
+	if not vox_on:  # l'interprète a besoin de whisper
+		_vox_start()
+		if is_instance_valid(vox_toggle):
+			vox_toggle.set_pressed_no_signal(true)
+
+
+func _interp_lang(key: String, now: float) -> String:
+	var ip := key.get_slice(":", 0)
+	if interp.has(ip) and now - interp[ip]["t"] < 8.0:
+		return interp[ip]["lang"]
+	return ""
+
+
+func _vox_serve(now: float) -> void:
+	while vox_tcp.is_listening() and vox_tcp.is_connection_available():
+		vox_conns.append({"p": vox_tcp.take_connection(), "buf": PackedByteArray(), "t": now})
+	for c in vox_conns.duplicate():
+		var p: StreamPeerTCP = c["p"]
+		p.poll()
+		if p.get_status() != StreamPeerTCP.STATUS_CONNECTED or now - c["t"] > (100.0 if c.has("wait") else 5.0):
+			vox_conns.erase(c)
+			continue
+		if c.has("wait"):
+			continue
+		var av := p.get_available_bytes()
+		if av > 0:
+			var b: PackedByteArray = c["buf"]
+			b.append_array(p.get_data(av)[1])
+			c["buf"] = b
+		var s: String = c["buf"].get_string_from_ascii()
+		if s.contains("\r\n\r\n"):
+			var line := s.get_slice("\r\n", 0)
+			if line.get_slice(" ", 1).begins_with("/interp"):
+				_vox_interp_set(p.get_connected_host(), line.get_slice(" ", 1).get_slice("lang=", 1).get_slice("&", 0), now)
+				_http_send(p, "application/json", "{}".to_utf8_buffer())
+				p.disconnect_from_host()
+				vox_conns.erase(c)
+				continue
+			if line.get_slice(" ", 1).begins_with("/tts"):
+				c["wait"] = true
+				_vox_tts_proxy(c, line.get_slice(" ", 1))
+				continue
+			_vox_reply(p, line)
+			p.disconnect_from_host()
+			vox_conns.erase(c)
+
+
+func _http_send(p: StreamPeerTCP, ctype: String, body: PackedByteArray) -> void:
+	var head := "HTTP/1.1 %s\r\nContent-Type: %s\r\nContent-Length: %d\r\nConnection: close\r\n\r\n" % [
+		"200 OK" if body.size() > 0 else "404 Not Found", ctype, body.size()]
+	p.put_data(head.to_utf8_buffer())
+	if body.size() > 0:
+		p.put_data(body)
+
+
+## Un client demande une synthèse vocale : on la fait faire par le moteur local, réponse différée.
+func _vox_tts_proxy(c: Dictionary, path: String) -> void:
+	var lang := "fr"
+	var text := ""
+	for kv in path.get_slice("?", 1).split("&"):
+		if kv.begins_with("lang="):
+			lang = kv.substr(5)
+		elif kv.begins_with("text="):
+			text = kv.substr(5).uri_decode()
+	_vox_spawn()
+	var h := HTTPRequest.new()
+	h.timeout = 90.0
+	add_child(h)
+	h.request_completed.connect(func(res: int, code: int, _hd: PackedStringArray, body: PackedByteArray) -> void:
+		h.queue_free()
+		var p: StreamPeerTCP = c["p"]
+		if p.get_status() == StreamPeerTCP.STATUS_CONNECTED:
+			_http_send(p, "audio/wav", body if res == HTTPRequest.RESULT_SUCCESS and code == 200 else PackedByteArray())
+			p.disconnect_from_host()
+		vox_conns.erase(c))
+	h.request_raw("http://127.0.0.1:%d/tts?lang=%s" % [VOX_PY_PORT, lang], PackedStringArray(),
+		HTTPClient.METHOD_POST, text.to_utf8_buffer())
+
+
+func _vox_reply(p: StreamPeerTCP, line: String) -> void:
+	var path := line.get_slice(" ", 1)
+	var body := PackedByteArray()
+	var ctype := "application/json"
+	if path.begins_with("/vox.json"):
+		var list := []
+		for it in vox_items:
+			list.append({"id": it["id"], "who": it["who"], "clock": it["clock"],
+				"text": it["text"], "tr": it["tr"], "lang": it["lang"]})
+		body = JSON.stringify(list).to_utf8_buffer()
+	elif path.begins_with("/vox/"):
+		var id := int(path.get_slice("/", 2).get_basename())
+		for it in vox_items:
+			if int(it["id"]) == id:
+				body = _wav_bytes(it["pcm"])
+				ctype = "audio/wav"
+	_http_send(p, ctype, body)
+
+
+# --- Côté client : liste reçue du host + lecture locale
+func _vox_client_tick(now: float) -> void:
+	if now < vox_poll_t:
+		return
+	vox_poll_t = now + 2.0
+	if vox_interp_http == null:
+		vox_interp_http = HTTPRequest.new()
+		vox_interp_http.timeout = 4.0
+		add_child(vox_interp_http)
+	vox_interp_http.request("http://%s:%d/interp?lang=%s" % [ip_edit.text.strip_edges(), VOX_PORT, interp_lang if interp_on else "off"])
+	vox_list_http.request("http://%s:%d/vox.json" % [ip_edit.text.strip_edges(), VOX_PORT])
+
+
+func _on_vox_list(res: int, code: int, _h: PackedStringArray, body: PackedByteArray) -> void:
+	if res != HTTPRequest.RESULT_SUCCESS or code != 200 or mode != "client":
+		return
+	var j: Variant = JSON.parse_string(body.get_string_from_utf8())
+	if typeof(j) != TYPE_ARRAY:
+		return
+	var changed := false
+	for it in j:
+		if typeof(it) == TYPE_DICTIONARY and not vox_seen.has(int(it["id"])):
+			vox_seen[int(it["id"])] = true
+			vox_client_items.append(it)
+			changed = true
+	while vox_client_items.size() > 30:
+		vox_client_items.pop_front()
+	if changed:
+		_vox_rebuild()
+
+
+func _vox_fetch(id: int) -> void:
+	vox_clip_id = id
+	vox_clip_http.cancel_request()
+	vox_clip_http.request("http://%s:%d/vox/%d.wav" % [ip_edit.text.strip_edges(), VOX_PORT, id])
+
+
+func _on_vox_clip(res: int, code: int, _h: PackedStringArray, body: PackedByteArray) -> void:
+	if res != HTTPRequest.RESULT_SUCCESS or code != 200:
+		return
+	var st := AudioStreamWAV.load_from_buffer(body)
+	if st == null:
+		return
+	if vox_cplayer == null:
+		vox_cplayer = AudioStreamPlayer.new()
+		add_child(vox_cplayer)
+	vox_cplayer.stream = st
+	vox_cplayer.volume_db = linear_to_db(maxf(volume, 0.0001))
+	vox_cplayer.play()
+
+
+# ---------------------------------------------------------------- Synthèse vocale (TTS) vers le micro
+func _tts_say(text: String, bus: String, is_host: bool) -> void:
+	text = text.strip_edges()
+	if text == "":
+		return
+	tts_bus = bus
+	for l in tts_labels:
+		if is_instance_valid(l):
+			l.text = "Synthèse en cours… (1ʳᵉ fois : téléchargement de la voix)"
+	tts_http.cancel_request()
+	if is_host:
+		_vox_spawn()
+		tts_http.request_raw("http://127.0.0.1:%d/tts?lang=%s" % [VOX_PY_PORT, tts_lang],
+			PackedStringArray(), HTTPClient.METHOD_POST, text.to_utf8_buffer())
+	else:
+		tts_http.request("http://%s:%d/tts?lang=%s&text=%s" % [ip_edit.text.strip_edges(), VOX_PORT, tts_lang, text.uri_encode()])
+
+
+func _on_tts(res: int, code: int, _h: PackedStringArray, body: PackedByteArray) -> void:
+	var st: AudioStreamWAV = null
+	if res == HTTPRequest.RESULT_SUCCESS and code == 200:
+		st = AudioStreamWAV.load_from_buffer(body)
+	for l in tts_labels:
+		if is_instance_valid(l):
+			l.text = "" if st else "Échec : moteur vocal indisponible (host lancé via sound-link.sh ?)"
+	if st == null:
+		return
+	var pl := AudioStreamPlayer.new()
+	pl.stream = st
+	pl.bus = tts_bus
+	pl.volume_db = linear_to_db(maxf(board_vol, 0.0001))
+	add_child(pl)
+	pl.finished.connect(pl.queue_free)
+	pl.play()
+	if tts_bus == "Capture":  # client : garder l'envoi du micro ouvert pendant la parole
+		board_until = maxf(board_until, Time.get_ticks_msec() / 1000.0 + st.get_length() + 0.3)
+
+
+## Synthèse immédiate dans le micro du PC (bus Board : jeu et/ou clients selon la soundboard).
+func _tts_direct(text: String, lang: String) -> void:
+	var h := HTTPRequest.new()
+	h.timeout = 60.0
+	add_child(h)
+	h.request_completed.connect(func(res: int, code: int, _hd: PackedStringArray, body: PackedByteArray) -> void:
+		h.queue_free()
+		if res != HTTPRequest.RESULT_SUCCESS or code != 200:
+			return
+		var st := AudioStreamWAV.load_from_buffer(body)
+		if st == null:
+			return
+		var pl := AudioStreamPlayer.new()
+		pl.stream = st
+		pl.bus = "Board"
+		pl.volume_db = linear_to_db(maxf(board_vol, 0.0001))
+		add_child(pl)
+		pl.finished.connect(pl.queue_free)
+		pl.play())
+	h.request_raw("http://127.0.0.1:%d/tts?lang=%s" % [VOX_PY_PORT, lang], PackedStringArray(),
+		HTTPClient.METHOD_POST, text.to_utf8_buffer())

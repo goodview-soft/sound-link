@@ -11,4 +11,11 @@ if ! pactl list short sinks 2>/dev/null | grep -q soundlink_sink; then
 	[ -n "$SINK" ] && pactl set-default-sink "$SINK"
 	[ -n "$SRC" ] && pactl set-default-source "$SRC"
 fi
-exec flatpak run --env=PULSE_SOURCE="${SINK}.monitor" org.godotengine.Godot --audio-driver PulseAudio --path "$DIR" "$@"
+# Moteur de reconnaissance vocale (whisper) hors du bac à sable flatpak
+# libère le port si un ancien moteur (ex. sans torch) l'occupe encore
+OLD="$(ss -ltnp 2>/dev/null | sed -n 's/.*127.0.0.1:4245 .*pid=\([0-9]*\).*/\1/p')"
+[ -n "$OLD" ] && kill $OLD 2>/dev/null && sleep 1
+python3 "$DIR/vox.py" 4245 small >/dev/null 2>&1 &
+VOX=$!
+trap 'kill $VOX 2>/dev/null' EXIT INT TERM
+flatpak run --env=PULSE_SOURCE="${SINK}.monitor" org.godotengine.Godot --audio-driver PulseAudio --path "$DIR" "$@"
