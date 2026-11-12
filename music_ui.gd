@@ -11,6 +11,8 @@ var _sig := ""
 var _get := HTTPRequest.new()
 var _post := HTTPRequest.new()
 var _t := 0.0
+var _checks: Array = []
+var _synced := false
 
 
 func build(card: VBoxContainer) -> void:
@@ -45,6 +47,8 @@ func build(card: VBoxContainer) -> void:
 		var c := CheckButton.new()
 		c.text = o[0]
 		c.button_pressed = true
+		c.set_meta("k", o[1])
+		_checks.append(c)
 		c.toggled.connect(func(on: bool) -> void: _send("%s=%d" % [o[1], int(on)]))
 		card.add_child(c)
 	_status = Label.new()
@@ -85,5 +89,9 @@ func _on_state(result: int, code: int, _h: PackedStringArray, body: PackedByteAr
 			_ids.append(str(x["id"]))
 			if str(x["id"]) == str(m.get("sel", "")):
 				_pick.select(_ids.size() - 1)
+	if not _synced:
+		_synced = true
+		for c in _checks:
+			c.set_pressed_no_signal(bool(m.get(c.get_meta("k"), true)))
 	_status.text = str(m.get("status", ""))
 	_play.text = "Arrêter (F9)" if str(m.get("playing", "")) != "" else "Lancer (F9)"

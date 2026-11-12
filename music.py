@@ -111,7 +111,7 @@ def music_tracks():
 
 def music_state():
     return {"tracks": music_tracks(), "sel": music["sel"], "playing": music["playing"], "status": music["status"],
-            "write": music["write"], "ptt": music["ptt"]}
+            "write": music["write"], "ptt": music["ptt"], "local": music["local"]}
 
 
 def fetch_lrc(title, artist, dur):
