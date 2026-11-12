@@ -12,8 +12,8 @@ config_version=5
 
 config/name="Sound Link"
 run/main_scene="res://boot.tscn"
-config/features=PackedStringArray("4.7")
 config/icon="res://icon.svg"
+config/features=PackedStringArray("4.7")
 
 [audio]
 
@@ -26,8 +26,6 @@ window/size/viewport_height=780
 window/stretch/mode="canvas_items"
 window/stretch/aspect="expand"
 window/handheld/orientation=1
-window/per_pixel_transparency/allowed=true
-window/subwindows/embed_subwindows=false
 
 [rendering]
 
