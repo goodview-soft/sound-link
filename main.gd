@@ -60,8 +60,6 @@ const C_OK := Color("#34d399")
 const C_DANGER := Color("#f87171")
 var host_box: VBoxContainer
 var client_box: VBoxContainer
-var btn_host: Button
-var btn_client: Button
 var dev_opt: OptionButton
 var host_btn: Button
 var host_status: Label
@@ -80,7 +78,6 @@ var pill_txt: Label
 var upd_card: PanelContainer
 var home_box: VBoxContainer
 var head_box: HBoxContainer
-var tabs_seg: PanelContainer
 var app_box: VBoxContainer
 var conn_lbl: Label
 var found_lbl: Label
@@ -256,32 +253,6 @@ class Spectrum extends Control:
 		return s
 
 
-class HeroWave extends Control:
-	## Onde décorative animée sous le titre.
-	const N := 36
-	var t := 0.0
-
-	func _init() -> void:
-		custom_minimum_size.y = 46
-		size_flags_horizontal = SIZE_EXPAND_FILL
-
-	func _process(d: float) -> void:
-		if is_visible_in_tree():
-			t += d
-			queue_redraw()
-
-	func _draw() -> void:
-		var w := size.x / N
-		var mid := size.y / 2.0
-		for i in N:
-			var x := float(i) / (N - 1)
-			var env := sin(x * PI)  # plus haut au centre
-			var a := 0.5 + 0.5 * sin(t * 2.2 + i * 0.45) * cos(t * 1.3 - i * 0.21)
-			var h := maxf(3.0, env * a * (size.y - 4))
-			var c := Color("#22d3ee").lerp(Color("#7c6cff"), x)
-			draw_rect(Rect2(i * w + w * 0.25, mid - h / 2, w * 0.5, h), Color(c, 0.35 + 0.5 * env))
-
-
 class ModeIcon extends Control:
 	## Pastille ronde avec un pictogramme Wi-Fi dessiné.
 	var hover := false:
@@ -388,18 +359,19 @@ func _build_ui() -> void:
 	root.add_theme_constant_override("separation", 14)
 	margin.add_child(root)
 
-	# --- En-tête : titre + pastille d'état
+	# --- En-tête des pages Host / Client : retour, titre, état
 	var head := HBoxContainer.new()
 	head_box = head
 	head.visible = false
+	head.add_theme_constant_override("separation", 10)
 	root.add_child(head)
-	var tb := VBoxContainer.new()
-	tb.size_flags_horizontal = SIZE_EXPAND_FILL
-	tb.add_theme_constant_override("separation", 0)
-	head.add_child(tb)
-	var title := _label("Sound Link", tb)
-	title.add_theme_font_size_override("font_size", 28)
-	_hint("Partage audio sur le réseau local  ·  v" + VERSION, tb)
+	var back := _button("‹", head)
+	back.theme_type_variation = "Tab"
+	back.add_theme_font_size_override("font_size", 24)
+	back.pressed.connect(_go_home)
+	conn_lbl = _label("", head)
+	conn_lbl.size_flags_horizontal = SIZE_EXPAND_FILL
+	conn_lbl.add_theme_font_size_override("font_size", 24)
 	var pill := PanelContainer.new()
 	pill.add_theme_stylebox_override("panel", _sb(C_FIELD, 20, 12, 6, C_BORDER))
 	pill.size_flags_vertical = SIZE_SHRINK_CENTER
@@ -418,25 +390,21 @@ func _build_ui() -> void:
 	app_box.visible = false
 	root.add_child(app_box)
 
-	# --- Accueil : héros
-	var hero := VBoxContainer.new()
-	hero.add_theme_constant_override("separation", 4)
-	home_box.add_child(hero)
+	# --- Accueil : logo + deux choix
 	var logo := TextureRect.new()
 	logo.texture = load("res://icon.svg")
 	logo.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
 	logo.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-	logo.custom_minimum_size = Vector2(84, 84)
-	hero.add_child(logo)
-	var ht := _label("Sound Link", hero)
-	ht.add_theme_font_size_override("font_size", 34)
+	logo.custom_minimum_size = Vector2(72, 72)
+	home_box.add_child(logo)
+	var ht := _label("Sound Link", home_box)
+	ht.add_theme_font_size_override("font_size", 30)
 	ht.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	var hs2 := _hint("Le son de ton PC sur ton téléphone,\net ton téléphone comme micro du PC.", hero)
-	hs2.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	hs2.add_theme_font_size_override("font_size", 14)
-	hero.add_child(HeroWave.new())
-
-	# --- Accueil : mises à jour + choix du mode
+	var spacer := Control.new()
+	spacer.custom_minimum_size.y = 8
+	home_box.add_child(spacer)
+	_mode_card(home_box, "Host", "Partager le son de ce PC", "host")
+	_mode_card(home_box, "Client", "Écouter le son d'un host, ou servir de micro", "client")
 	upd_card = PanelContainer.new()
 	upd_card.add_theme_stylebox_override("panel", _sb(C_CARD, 12, 14, 8, C_BORDER))
 	home_box.add_child(upd_card)
@@ -449,10 +417,6 @@ func _build_ui() -> void:
 	upd_btn.theme_type_variation = "Tab"
 	upd_btn.toggle_mode = false
 	upd_btn.pressed.connect(_do_update)
-	var ml := _label("COMMENCER", home_box)
-	ml.add_theme_font_size_override("font_size", 12)
-	ml.add_theme_color_override("font_color", C_MUTED)
-	_mode_card(home_box, "Sans fil", "Host / clients sur le réseau local : PC, téléphones…", "~60–100 ms")
 	var foot := LinkButton.new()
 	foot.text = "v%s  ·  github.com/goodview-soft/sound-link" % VERSION
 	foot.uri = "https://github.com/goodview-soft/sound-link"
@@ -464,37 +428,11 @@ func _build_ui() -> void:
 	home_box.add_child(foot)
 
 	root = app_box
-	var back_row := HBoxContainer.new()
-	root.add_child(back_row)
-	_button("‹  Accueil", back_row).pressed.connect(_go_home)
-	conn_lbl = _label("", back_row)
-	conn_lbl.size_flags_horizontal = SIZE_EXPAND_FILL
-	conn_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
-	conn_lbl.add_theme_color_override("font_color", C_ACCENT2)
-
-	# --- Onglets segmentés
-	var seg := PanelContainer.new()
-	seg.add_theme_stylebox_override("panel", _sb(C_FIELD, 12, 4, 4, C_BORDER))
-	root.add_child(seg)
-	tabs_seg = seg
-	var tabs := HBoxContainer.new()
-	seg.add_child(tabs)
-	var group := ButtonGroup.new()
-	btn_host = _button("Host  ·  diffuser", tabs)
-	btn_client = _button("Client  ·  écouter", tabs)
-	for b in [btn_host, btn_client]:
-		b.toggle_mode = true
-		b.button_group = group
-		b.theme_type_variation = "Tab"
-		b.size_flags_horizontal = SIZE_EXPAND_FILL
-	btn_host.pressed.connect(_set_mode.bind("host"))
-	btn_client.pressed.connect(_set_mode.bind("client"))
-
 	# --- Host
 	host_box = VBoxContainer.new()
 	host_box.add_theme_constant_override("separation", 14)
 	root.add_child(host_box)
-	var hs := _card(host_box, "Source")
+	var hs := _card(host_box, "Son partagé")
 	var src := OS.get_environment("PULSE_SOURCE")
 	_hint("« Default » = sortie son du PC." if src.ends_with(".monitor")
 		else "Pour envoyer la sortie son du PC, lancer via sound-link.sh puis garder « Default ».", hs)
@@ -521,9 +459,6 @@ func _build_ui() -> void:
 	clients_list.add_theme_constant_override("separation", 10)
 	hc.add_child(clients_list)
 	if not OS.has_feature("mobile"):
-		var mu = preload("res://music_ui.gd").new()
-		host_box.add_child(mu)
-		mu.build(_card(host_box, "Musique (micro du jeu)"))
 		var qc := _card(host_box, "Installer sur un téléphone")
 		var qh := HBoxContainer.new()
 		qh.add_theme_constant_override("separation", 14)
@@ -540,7 +475,7 @@ func _build_ui() -> void:
 		qv.alignment = BoxContainer.ALIGNMENT_CENTER
 		qh.add_child(qv)
 		_label("Scanner avec le téléphone", qv)
-		_hint("Télécharge la dernière version de l'appli Android. Autoriser l'installation si Android le demande, puis choisir Sans fil : l'IP de ce PC est détectée toute seule.", qv)
+		_hint("Télécharge la dernière version de l'appli Android. Autoriser l'installation si Android le demande, puis choisir Client : l'IP de ce PC est détectée toute seule.", qv)
 
 	# --- Client
 	client_box = VBoxContainer.new()
@@ -799,8 +734,6 @@ func _set_mode(m: String) -> void:
 	mode = m
 	host_box.visible = m == "host"
 	client_box.visible = m == "client"
-	btn_host.set_pressed_no_signal(m == "host")
-	btn_client.set_pressed_no_signal(m == "client")
 	if m == "host":
 		_refresh_devices()
 
@@ -1201,7 +1134,7 @@ func _on_pck(result: int, code: int, _h: PackedStringArray, _b: PackedByteArray)
 
 # ---------------------------------------------------------------- Accueil / modes
 
-func _mode_card(parent: Node, title: String, desc: String, badge: String) -> void:
+func _mode_card(parent: Node, title: String, desc: String, target: String) -> void:
 	var b := Button.new()
 	b.theme_type_variation = "ModeCard"
 	b.custom_minimum_size.y = 96
@@ -1224,30 +1157,20 @@ func _mode_card(parent: Node, title: String, desc: String, badge: String) -> voi
 	v.alignment = BoxContainer.ALIGNMENT_CENTER
 	v.add_theme_constant_override("separation", 2)
 	h.add_child(v)
-	var tr := HBoxContainer.new()
-	tr.mouse_filter = MOUSE_FILTER_IGNORE
-	v.add_child(tr)
-	var t := _label(title, tr)
+	var t := _label(title, v)
 	t.add_theme_font_size_override("font_size", 19)
-	t.size_flags_horizontal = SIZE_EXPAND_FILL
-	var bp := PanelContainer.new()
-	bp.mouse_filter = MOUSE_FILTER_IGNORE
-	bp.add_theme_stylebox_override("panel", _sb(Color(C_ACCENT2, 0.12), 10, 8, 2))
-	tr.add_child(bp)
-	var bl := _label(badge, bp)
-	bl.add_theme_font_size_override("font_size", 12)
-	bl.add_theme_color_override("font_color", C_ACCENT2)
 	_hint(desc, v)
 	var arrow := _label("›", h)
 	arrow.add_theme_font_size_override("font_size", 26)
 	arrow.add_theme_color_override("font_color", C_MUTED)
 	b.mouse_entered.connect(func() -> void: ic.hover = true)
 	b.mouse_exited.connect(func() -> void: ic.hover = false)
-	b.pressed.connect(_enter_app)
+	b.pressed.connect(_enter_app.bind(target))
 
 
-func _enter_app() -> void:
-	conn_lbl.text = "Mode sans fil"
+func _enter_app(target: String) -> void:
+	_set_mode(target)
+	conn_lbl.text = "Host" if target == "host" else "Client"
 	home_box.visible = false
 	head_box.visible = true
 	app_box.visible = true

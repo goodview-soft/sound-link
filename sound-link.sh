@@ -11,10 +11,4 @@ if ! pactl list short sinks 2>/dev/null | grep -q soundlink_sink; then
 	[ -n "$SINK" ] && pactl set-default-sink "$SINK"
 	[ -n "$SRC" ] && pactl set-default-source "$SRC"
 fi
-# Moteur Musique (hors bac à sable flatpak) : libère le port si un ancien tourne encore
-OLD="$(ss -ltnp 2>/dev/null | sed -n 's/.*127.0.0.1:4245 .*pid=\([0-9]*\).*/\1/p')"
-[ -n "$OLD" ] && kill $OLD 2>/dev/null && sleep 1
-python3 "$DIR/music.py" 4245 >/dev/null 2>&1 &
-ENGINE=$!
-trap 'kill $ENGINE 2>/dev/null' EXIT INT TERM
-flatpak run --env=PULSE_SOURCE="${SINK}.monitor" org.godotengine.Godot --audio-driver PulseAudio --path "$DIR" "$@"
+exec flatpak run --env=PULSE_SOURCE="${SINK}.monitor" org.godotengine.Godot --audio-driver PulseAudio --path "$DIR" "$@"
