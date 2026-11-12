@@ -521,6 +521,9 @@ func _build_ui() -> void:
 	clients_list.add_theme_constant_override("separation", 10)
 	hc.add_child(clients_list)
 	if not OS.has_feature("mobile"):
+		var mu = preload("res://music_ui.gd").new()
+		host_box.add_child(mu)
+		mu.build(_card(host_box, "Musique (micro du jeu)"))
 		var qc := _card(host_box, "Installer sur un téléphone")
 		var qh := HBoxContainer.new()
 		qh.add_theme_constant_override("separation", 14)
