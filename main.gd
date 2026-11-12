@@ -78,7 +78,7 @@ var pill_dot: Label
 var pill_txt: Label
 var upd_card: PanelContainer
 var role_btns := {}
-const CHECK_UPDATES := false  # mettre true quand une release plus récente que le code existe
+const CHECK_UPDATES := true  # mettre true quand une release plus récente que le code existe
 var main_margin: MarginContainer
 var drawer: Control
 var drawer_margin: MarginContainer
