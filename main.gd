@@ -29,6 +29,7 @@ var listening := {}  # id -> true : appareils que j'écoute
 var subs := {}  # "ip:port" -> {ip, port, t} : appareils qui m'écoutent
 var rxs := {}  # "ip:port" -> {snd: RxStream, mic: RxStream, bus, bus_name}
 var peers_sig := ""
+var peer_cfg := {}  # id appareil -> {vol, bal, mute} (mémorisé)
 var beacon_t := 0.0
 var sub_t := 0.0
 var vsink_exists := false
@@ -281,6 +282,53 @@ class Switch extends Control:
 		draw_circle(Vector2(16 + k * (size.x - 32), size.y / 2.0), 12, Color("#f4efe6") if on else Color("#9aa1b3"))
 
 
+class Ico extends Control:
+	## Icône dessinée, cliquable : "vol" (haut-parleur), "mute" (barré, bascule), "center" (recentrer).
+	signal pressed
+	signal toggled(on: bool)
+	var kind := "vol"
+	var on := false  # pour "mute" : coupé
+
+	func _init(k: String, clickable := false, sz := 32.0) -> void:
+		kind = k
+		custom_minimum_size = Vector2(sz, sz)
+		size_flags_vertical = SIZE_SHRINK_CENTER
+		mouse_filter = MOUSE_FILTER_STOP if clickable else MOUSE_FILTER_IGNORE
+
+	func set_on(v: bool) -> void:
+		on = v
+		queue_redraw()
+
+	func _gui_input(ev: InputEvent) -> void:
+		if ev is InputEventMouseButton and ev.pressed and ev.button_index == MOUSE_BUTTON_LEFT:
+			if kind == "mute":
+				on = not on
+				toggled.emit(on)
+				queue_redraw()
+			else:
+				pressed.emit()
+			accept_event()
+
+	func _draw() -> void:
+		var c := size / 2.0
+		var fg := Color("#7d8497")
+		if kind == "mute":
+			fg = Color("#ffb347") if on else Color("#7d8497")
+		if kind == "center":
+			draw_arc(c, 6, 0, TAU, 20, fg, 2.0, true)
+			draw_line(c + Vector2(0, -10), c + Vector2(0, -6), fg, 2.0)
+			draw_line(c + Vector2(0, 6), c + Vector2(0, 10), fg, 2.0)
+			return
+		draw_colored_polygon(PackedVector2Array([c + Vector2(-9, -3.5), c + Vector2(-5, -3.5), c + Vector2(0, -8),
+			c + Vector2(0, 8), c + Vector2(-5, 3.5), c + Vector2(-9, 3.5)]), fg)
+		if kind == "mute" and on:
+			draw_line(c + Vector2(4, -4), c + Vector2(10, 4), fg, 2.0)
+			draw_line(c + Vector2(10, -4), c + Vector2(4, 4), fg, 2.0)
+		else:
+			draw_arc(c, 6, -0.9, 0.9, 10, fg, 2.0, true)
+			draw_arc(c, 10, -0.9, 0.9, 10, Color(fg, 0.6), 2.0, true)
+
+
 class SpeakerHero extends Control:
 	## Haut-parleur central : disque + anneaux qui suivent le niveau sonore.
 	var level := 0.0
@@ -290,7 +338,7 @@ class SpeakerHero extends Control:
 	var t := 0.0
 
 	func _init() -> void:
-		custom_minimum_size.y = 200
+		custom_minimum_size.y = 144
 		size_flags_horizontal = SIZE_EXPAND_FILL
 
 	func set_levels(a: float, b: float) -> void:
@@ -305,14 +353,16 @@ class SpeakerHero extends Control:
 		var c := size / 2.0
 		var on := state == 2
 		var col := Color("#ffb347") if state > 0 else Color("#4a5063")
-		var base := 56.0
+		var base := 34.0
 		for i in 3:
-			var r := base + 14.0 + i * 18.0 + shown * 18.0 * (i + 1) + (sin(t * 1.5 + i * 1.3) * 2.0 if state > 0 else 0.0)
+			var r := base + 8.0 + i * 8.0 + shown * 4.0 * (i + 1) + (sin(t * 1.5 + i * 1.3) * 2.0 if state > 0 else 0.0)
 			var a := (0.34 - i * 0.09) * (1.0 if on else 0.45)
 			draw_arc(c, r, 0, TAU, 72, Color(col, a), 2.0, true)
 		draw_circle(c, base, Color("#161821"))
 		draw_arc(c, base, 0, TAU, 72, Color(col, 0.95 if on else 0.4), 2.0, true)
 		var fg := Color("#f4efe6") if state > 0 else Color("#7d8497")
+		draw_set_transform(c, 0.0, Vector2(0.62, 0.62))
+		c = Vector2.ZERO
 		if kind == 2:
 			draw_rect(Rect2(c + Vector2(-14, -22), Vector2(28, 44)), fg, false, 3.0)
 			draw_circle(c + Vector2(0, 15), 2.2, fg)
@@ -371,10 +421,13 @@ func _ready() -> void:
 	mic_gain = cfg.get_value("share", "mic_gain", 1.0)
 	volume = cfg.get_value("listen", "volume", 1.0)
 	balance = cfg.get_value("listen", "balance", 0.0)
-	my_id = str(randi())
+	my_id = cfg.get_value("app", "id", "")
+	if my_id == "":
+		my_id = str(randi())
+	peer_cfg = cfg.get_value("peers", "cfg", {})
 	_build_ui()
 	if not OS.has_feature("mobile"):
-		get_window().min_size = Vector2i(380, 640)
+		get_window().min_size = Vector2i(400, 680)
 	_refresh_devices()
 	if udp.bind(data_port) != OK:
 		pill_txt.text = "Port %d indisponible" % data_port
@@ -398,6 +451,8 @@ func _save() -> void:
 	cfg.set_value("share", "mic_gain", mic_gain)
 	cfg.set_value("listen", "volume", volume)
 	cfg.set_value("listen", "balance", balance)
+	cfg.set_value("app", "id", my_id)
+	cfg.set_value("peers", "cfg", peer_cfg)
 	cfg.set_value("app", "ip", ip_edit.text)
 	cfg.set_value("app", "name", name_edit.text)
 	if dev_opt.selected >= 0:
@@ -452,7 +507,7 @@ func _build_ui() -> void:
 	meter = hero
 	me.add_child(hero)
 	hero_name = _label("", me)
-	hero_name.add_theme_font_size_override("font_size", 28)
+	hero_name.add_theme_font_size_override("font_size", 24)
 	hero_name.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	hero_name.clip_text = true
 	var st := HBoxContainer.new()
@@ -1022,6 +1077,21 @@ func _listened(ip: String, port: int) -> bool:
 	return false
 
 
+## Réglages d'un appareil écouté : volume, balance (-1 G .. +1 D), muet.
+func _pcfg(id: String) -> Dictionary:
+	if not peer_cfg.has(id):
+		peer_cfg[id] = {"vol": 1.0, "bal": 0.0, "mute": false}
+	return peer_cfg[id]
+
+
+func _id_for_key(key: String) -> String:
+	for id in listening:
+		var p: Dictionary = peers.get(id, {})
+		if not p.is_empty() and "%s:%d" % [p["ip"], p["port"]] == key:
+			return id
+	return ""
+
+
 func _toggle_listen(id: String) -> void:
 	if listening.has(id):
 		_unlisten(id)
@@ -1111,19 +1181,26 @@ func _play_process(now: float) -> Vector2:
 				AudioServer.set_bus_mute(AudioServer.get_bus_index(e["bus"]), true)
 		AudioServer.output_device = "Default"
 	in_v = AudioServer.output_device == VSINK
-	var gl := 0.0
-	var gr := 0.0
-	if not muted and not in_v:
-		var v := volume * volume / 32768.0  # courbe perceptive
-		gl = v * minf(1.0, 1.0 - balance)
-		gr = v * minf(1.0, 1.0 + balance)
 	var peak := Vector2.ZERO
-	for e in rxs.values():
+	for key in rxs.keys():
+		var e: Dictionary = rxs[key]
+		var pc := _pcfg(_id_for_key(key))
+		var pv: float = pc["vol"] * pc["vol"] / 32768.0  # courbe perceptive
+		var pb: float = pc["bal"]
 		if e["snd"]:
+			var gl := 0.0
+			var gr := 0.0
+			if not muted and not pc["mute"] and not in_v:
+				var bl := clampf(balance + pb, -1.0, 1.0)
+				var v := volume * volume * pv
+				gl = v * minf(1.0, 1.0 - bl)
+				gr = v * minf(1.0, 1.0 + bl)
 			peak = peak.max(e["snd"].pump(gl, gr))
 		if e["mic"]:
+			# un lecteur + un bus par pair, mixés dans la sortie soundlink_sink ; balance par pair
 			AudioServer.set_bus_mute(AudioServer.get_bus_index(e["bus"]), not in_v)
-			e["mic"].pump(1.0 / 32768.0, 1.0 / 32768.0)
+			var mv := 0.0 if pc["mute"] else pv
+			e["mic"].pump(mv * minf(1.0, 1.0 - pb), mv * minf(1.0, 1.0 + pb))
 	return peak
 
 
@@ -1309,6 +1386,50 @@ func _discovery(now: float, delta: float) -> void:
 		_rebuild_peers()
 
 
+## Réglages de l'appareil écouté : volume + muet (icônes), balance G/D (centre par défaut).
+func _peer_controls(id: String) -> void:
+	var pc := _pcfg(id)
+	var pm := MarginContainer.new()
+	pm.add_theme_constant_override("margin_left", 32)
+	pm.add_theme_constant_override("margin_right", 8)
+	pm.add_theme_constant_override("margin_bottom", 8)
+	found_list.add_child(pm)
+	var v := _vbox(pm, 8)
+	var r1 := HBoxContainer.new()
+	r1.add_theme_constant_override("separation", 8)
+	v.add_child(r1)
+	r1.add_child(Ico.new("vol", false, 24.0))
+	var vs := _slider(0, 150, pc["vol"] * 100.0, r1)
+	vs.size_flags_horizontal = SIZE_EXPAND_FILL
+	vs.size_flags_vertical = SIZE_SHRINK_CENTER
+	vs.value_changed.connect(func(x: float) -> void: pc["vol"] = x / 100.0)
+	var mb := Ico.new("mute", true)
+	mb.set_on(pc["mute"])
+	mb.toggled.connect(func(on: bool) -> void: pc["mute"] = on)
+	r1.add_child(mb)
+	var r2 := HBoxContainer.new()
+	r2.add_theme_constant_override("separation", 8)
+	v.add_child(r2)
+	var gl := _hint("G", r2)
+	gl.autowrap_mode = TextServer.AUTOWRAP_OFF
+	gl.custom_minimum_size.x = 24
+	gl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	gl.add_theme_font_size_override("font_size", 11)
+	var bs := _slider(-100, 100, pc["bal"] * 100.0, r2)
+	bs.size_flags_horizontal = SIZE_EXPAND_FILL
+	bs.size_flags_vertical = SIZE_SHRINK_CENTER
+	bs.value_changed.connect(func(x: float) -> void: pc["bal"] = x / 100.0)
+	bs.gui_input.connect(func(ev: InputEvent) -> void:
+		if ev is InputEventMouseButton and ev.double_click:
+			bs.value = 0)
+	var dl := _hint("D", r2)
+	dl.autowrap_mode = TextServer.AUTOWRAP_OFF
+	dl.add_theme_font_size_override("font_size", 11)
+	var cb := Ico.new("center", true)
+	cb.pressed.connect(func() -> void: bs.value = 0)
+	r2.add_child(cb)
+
+
 func _rebuild_peers() -> void:
 	for ch in found_list.get_children():
 		ch.queue_free()
@@ -1349,6 +1470,8 @@ func _rebuild_peers() -> void:
 		rl.add_theme_color_override("font_color", C_ACCENT if on else C_MUTED)
 		for lb in [nm, dot, rl]:
 			lb.mouse_filter = MOUSE_FILTER_IGNORE
+		if on:
+			_peer_controls(k)
 	found_lbl.visible = peers.is_empty()
 	found_lbl.text = "Aucun autre appareil détecté"
 	list_title.text = "Touchez un appareil pour l'écouter" if (not peers.is_empty() and listening.is_empty()) else "Appareils à proximité"
