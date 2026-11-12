@@ -31,6 +31,12 @@ var _ai_me: LineEdit
 var _ai_ptt: LineEdit
 var _ai_box: VBoxContainer
 var _ai_sig := ""
+var _mu_url: LineEdit
+var _mu_pick: OptionButton
+var _mu_status: Label
+var _mu_play: Button
+var _mu_ids: Array = []
+var _mu_sig := ""
 var _overlay: Overlay
 var _ov_on := false
 var _ov_primed := false
@@ -151,6 +157,38 @@ func _ready() -> void:
 	_ai_box = VBoxContainer.new()
 	_ai_box.add_theme_constant_override("separation", 4)
 	ac.add_child(_ai_box)
+	var mc := Ui.card(self, "Musique (micro + paroles dans le chat)")
+	var mr := HBoxContainer.new()
+	mr.add_theme_constant_override("separation", 8)
+	mc.add_child(mr)
+	_mu_url = LineEdit.new()
+	_mu_url.placeholder_text = "Lien YouTube"
+	_mu_url.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	mr.add_child(_mu_url)
+	var mdl := Ui.button("Télécharger", mr)
+	mdl.pressed.connect(func() -> void:
+		if _mu_url.text.strip_edges() != "":
+			_call("/music?url=" + _mu_url.text.strip_edges().uri_encode(), HTTPClient.METHOD_POST)
+			_mu_url.text = "")
+	_mu_pick = OptionButton.new()
+	_mu_pick.item_selected.connect(func(i: int) -> void:
+		if i >= 0 and i < _mu_ids.size():
+			_call("/music?sel=" + str(_mu_ids[i]).uri_encode(), HTTPClient.METHOD_POST))
+	mc.add_child(_mu_pick)
+	_mu_play = Ui.button("Lancer / arrêter (F9)", mc)
+	_mu_play.pressed.connect(func() -> void: _call("/music?toggle=1", HTTPClient.METHOD_POST))
+	var mw := Ui.button("Écrire les paroles dans le chat (Entrée, ligne, Entrée)", mc)
+	mw.theme_type_variation = "Toggle"
+	mw.toggle_mode = true
+	mw.button_pressed = true
+	mw.toggled.connect(func(on: bool) -> void: _call("/music?write=%d" % int(on), HTTPClient.METHOD_POST))
+	var mp := Ui.button("Maintenir la touche radio pendant la musique", mc)
+	mp.theme_type_variation = "Toggle"
+	mp.toggle_mode = true
+	mp.button_pressed = true
+	mp.toggled.connect(func(on: bool) -> void: _call("/music?ptt=%d" % int(on), HTTPClient.METHOD_POST))
+	_mu_status = Ui.label("", mc)
+	Ui.hint("La musique sort dans « Sound-Link-Micro ». Le jeu doit rester au premier plan ; F9 démarre/arrête où que tu sois.", mc)
 	var cc := Ui.card(self, "Chat récupéré")
 	var ob := Ui.button("Traduction en jeu (overlay haut droite)", cc)
 	ob.theme_type_variation = "Toggle"
@@ -329,6 +367,7 @@ func _on_ocr(ok: bool, body: PackedByteArray) -> void:
 	if _players_box.get_child_count() == 0:
 		Ui.hint("Aucun joueur détecté (trace le cadre « joueurs »).", _players_box)
 	_ai_show(j.get("assistant", {}))
+	_music_show(j.get("music", {}))
 	var lines: Array = j.get("chat", [])
 	_overlay_feed(lines)
 	var tr_n := 0
@@ -394,6 +433,24 @@ func _ai_show(a: Dictionary) -> void:
 		r.add_theme_font_size_override("normal_font_size", 13)
 		r.text = "[color=#8a92a6]%s : %s[/color]\n[color=#34d399]→ %s[/color]" % [_bb(str(log[i]["to"])), _bb(str(log[i]["msg"])), _bb(str(log[i]["reply"]))]
 		_ai_box.add_child(r)
+
+
+func _music_show(m: Dictionary) -> void:
+	if _mu_pick == null or m.is_empty():
+		return
+	var tr: Array = m.get("tracks", [])
+	var sig := str(tr.size()) + str(m.get("sel", ""))
+	if sig != _mu_sig:
+		_mu_sig = sig
+		_mu_pick.clear()
+		_mu_ids.clear()
+		for t in tr:
+			_mu_pick.add_item(str(t["title"]) + ("" if t.get("lrc", false) else "  (sans paroles)"))
+			_mu_ids.append(str(t["id"]))
+			if str(t["id"]) == str(m.get("sel", "")):
+				_mu_pick.select(_mu_ids.size() - 1)
+	_mu_status.text = str(m.get("status", ""))
+	_mu_play.text = ("Arrêter (F9)" if str(m.get("playing", "")) != "" else "Lancer (F9)")
 
 
 func _bb(t: String) -> String:
