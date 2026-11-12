@@ -4,52 +4,49 @@ extends Control
 ## Un client (ex. téléphone) peut renvoyer son micro (PCM 16 bits mono, préfixe "MIC1") :
 ## le host le joue dans le micro virtuel « Sound-Link-Micro » créé par sound-link.sh.
 
-const PORT := 4242
 const FRAMES_PER_PACKET := 480
 const TIMEOUT := 3.0
 const MAX_QUEUE := 8
 const PREBUFFER := 4
 const CFG_PATH := "user://settings.cfg"
-const MIC_TAG := "MIC1"
+const SND_TAG := "SND1"  # flux « son » : SND1 + seq u32 + rate u32 + PCM s16 stéréo
+const MIC_TAG := "MIC1"  # flux « micro » : MIC1 + seq u32 + rate u32 + PCM s16 mono
 const VSINK := "soundlink_sink"
 const VERSION: String = preload("res://version.gd").VERSION
 const UPDATE_URL := "https://github.com/goodview-soft/sound-link/releases/latest/download/version.json"
-const DISC_PORT := 4243
-const BEACON := "SOUNDLINK1"  # ancien format (hosts), toujours émis pour les anciennes versions
-const INVITE := "SL2INV"  # SL2INV|id : la source invite un haut-parleur à se connecter
-const BEACON2 := "SL2"  # SL2|id|rôle|état|nom
+const BEACON := "SL3"  # SL3|id|port|flags|nom  (flags : son, micro)
 const RELEASES_URL := "https://github.com/goodview-soft/sound-link/releases/latest"
+const CHECK_UPDATES := true  # mettre false pour ignorer les mises à jour
 
+var data_port := 4242
+var disc_port := 4243
 var udp := PacketPeerUDP.new()
-var mode := ""
-var running := false
+var disc := PacketPeerUDP.new()
 var cfg := ConfigFile.new()
+var my_id := ""
+var peers := {}  # id -> {ip, port, snd, mic, name, t}
+var listening := {}  # id -> true : appareils que j'écoute
+var subs := {}  # "ip:port" -> {ip, port, t} : appareils qui m'écoutent
+var rxs := {}  # "ip:port" -> {snd: RxStream, mic: RxStream, bus, bus_name}
+var peers_sig := ""
+var beacon_t := 0.0
+var sub_t := 0.0
+var vsink_exists := false
 
-# Capture (source du host, ou micro du client)
+# Capture locale : une seule à la fois (« snd » = sortie du PC, « mic » = micro)
 var capture: AudioEffectCapture
 var mic_player: AudioStreamPlayer
-
-# Host
-var clients := {}
+var cap_kind := ""
 var seq := 0
 var host_gain := 1.0
-var vsink_ok := false
-var bus_id := 0
-
-# Client
-var rx: RxStream
-var hello_t := 0.0
+var mic_gain := 1.0
 var volume := 1.0
 var balance := 0.0
 var muted := false
-var send_mic := false
-var mic_gain := 1.0
-var mic_seq := 0
-
+var bus_id := 0
 var level_l := 0.0
 var level_r := 0.0
 
-# UI
 const C_BG := Color("#0c0d12")
 const C_CARD := Color("#14161e")
 const C_FIELD := Color("#10131a")
@@ -60,45 +57,26 @@ const C_TEXT := Color("#e7eaf0")
 const C_MUTED := Color("#7d8497")
 const C_OK := Color("#5eead4")
 const C_DANGER := Color("#f87171")
-var host_box: VBoxContainer
-var client_box: VBoxContainer
 var dev_opt: OptionButton
-var host_btn: Button
-var host_status: Label
+var mic_opt: OptionButton
 var vsink_lbl: Label
-var no_client_lbl: Label
-var clients_list: VBoxContainer
 var ip_edit: LineEdit
 var name_edit: LineEdit
-var client_btn: Button
-var client_status: Label
 var bal_slider: HSlider
-var mic_box: VBoxContainer
 var meter: SpeakerHero
 var pill_dot: Label
 var pill_txt: Label
+var sw_snd: Switch
+var sw_mic: Switch
 var upd_card: PanelContainer
-var role_btns := {}
-const CHECK_UPDATES := true  # mettre true quand une release plus récente que le code existe
 var main_margin: MarginContainer
 var drawer: Control
 var drawer_margin: MarginContainer
 var upd_dot: Label
 var list_title: Label
-var host_rest: VBoxContainer
-var client_rest: VBoxContainer
-var host_opts: VBoxContainer
-var ip_box: VBoxContainer
-var my_id := ""
-var peers := {}
-var peers_sig := ""
-var app_box: VBoxContainer
 var found_lbl: Label
-var disc := PacketPeerUDP.new()
 var found_list: VBoxContainer
 var hero_name: Label
-var root_box: VBoxContainer
-var beacon_t := 0.0
 var upd_lbl: Label
 var upd_btn: Button
 var upd_http: HTTPRequest
@@ -269,16 +247,50 @@ class Spectrum extends Control:
 		return s
 
 
+class Switch extends Control:
+	## Interrupteur animé.
+	signal toggled(on: bool)
+	var on := false
+	var k := 0.0
+
+	func _init() -> void:
+		custom_minimum_size = Vector2(56, 32)
+		size_flags_vertical = SIZE_SHRINK_CENTER
+
+	func set_on(v: bool) -> void:
+		on = v
+
+	func _gui_input(ev: InputEvent) -> void:
+		if ev is InputEventMouseButton and ev.pressed and ev.button_index == MOUSE_BUTTON_LEFT:
+			on = not on
+			toggled.emit(on)
+			accept_event()
+
+	func _process(d: float) -> void:
+		var t := 1.0 if on else 0.0
+		if absf(k - t) > 0.001:
+			k = move_toward(k, t, d * 8.0)
+			queue_redraw()
+
+	func _draw() -> void:
+		var sb := StyleBoxFlat.new()
+		sb.bg_color = Color("#2a2e3b").lerp(Color("#ffb347"), k)
+		sb.set_corner_radius_all(16)
+		sb.anti_aliasing = true
+		draw_style_box(sb, Rect2(Vector2.ZERO, size))
+		draw_circle(Vector2(16 + k * (size.x - 32), size.y / 2.0), 12, Color("#f4efe6") if on else Color("#9aa1b3"))
+
+
 class SpeakerHero extends Control:
 	## Haut-parleur central : disque + anneaux qui suivent le niveau sonore.
 	var level := 0.0
 	var shown := 0.0
-	var kind := 0  # 0 haut-parleur, 1 ordinateur
+	var kind := 1  # 1 ordinateur, 2 téléphone
 	var state := 0  # 0 arrêté, 1 connexion, 2 actif
 	var t := 0.0
 
 	func _init() -> void:
-		custom_minimum_size.y = 250
+		custom_minimum_size.y = 200
 		size_flags_horizontal = SIZE_EXPAND_FILL
 
 	func set_levels(a: float, b: float) -> void:
@@ -301,6 +313,10 @@ class SpeakerHero extends Control:
 		draw_circle(c, base, Color("#161821"))
 		draw_arc(c, base, 0, TAU, 72, Color(col, 0.95 if on else 0.4), 2.0, true)
 		var fg := Color("#f4efe6") if state > 0 else Color("#7d8497")
+		if kind == 2:
+			draw_rect(Rect2(c + Vector2(-14, -22), Vector2(28, 44)), fg, false, 3.0)
+			draw_circle(c + Vector2(0, 15), 2.2, fg)
+			return
 		if kind == 1:
 			draw_rect(Rect2(c + Vector2(-24, -20), Vector2(48, 31)), fg)
 			draw_rect(Rect2(c + Vector2(-20, -16), Vector2(40, 23)), Color("#161821"))
@@ -347,39 +363,54 @@ class LevelMeter extends Control:
 
 func _ready() -> void:
 	cfg.load(CFG_PATH)
-	host_gain = cfg.get_value("host", "gain", 1.0)
-	volume = cfg.get_value("client", "volume", 1.0)
-	balance = cfg.get_value("client", "balance", 0.0)
-	send_mic = cfg.get_value("client", "send_mic", false)
-	mic_gain = cfg.get_value("client", "mic_gain", 1.0)
+	if OS.get_environment("SL_PORT") != "":
+		data_port = OS.get_environment("SL_PORT").to_int()
+	if OS.get_environment("SL_DISC") != "":
+		disc_port = OS.get_environment("SL_DISC").to_int()
+	host_gain = cfg.get_value("share", "gain", 1.0)
+	mic_gain = cfg.get_value("share", "mic_gain", 1.0)
+	volume = cfg.get_value("listen", "volume", 1.0)
+	balance = cfg.get_value("listen", "balance", 0.0)
 	my_id = str(randi())
 	_build_ui()
 	if not OS.has_feature("mobile"):
 		get_window().min_size = Vector2i(380, 640)
-	_set_mode(cfg.get_value("app", "mode", "client" if OS.get_name() == "Android" else "host"))
+	_refresh_devices()
+	if udp.bind(data_port) != OK:
+		pill_txt.text = "Port %d indisponible" % data_port
+	vsink_exists = VSINK in AudioServer.get_output_device_list()
 	_check_update()
 
 
 func _exit_tree() -> void:
-	_stop()
+	for id in listening.keys():
+		_unlisten(id)
+	_stop_capture()
+	for k in rxs.keys():
+		_free_rx(k)
+	if AudioServer.output_device == VSINK:
+		AudioServer.output_device = "Default"
 	_save()
 
 
 func _save() -> void:
-	cfg.set_value("app", "mode", mode)
-	cfg.set_value("host", "gain", host_gain)
-	cfg.set_value("client", "volume", volume)
-	cfg.set_value("client", "balance", balance)
-	cfg.set_value("client", "ip", ip_edit.text)
-	cfg.set_value("client", "name", name_edit.text)
-	cfg.set_value("client", "send_mic", send_mic)
-	cfg.set_value("client", "mic_gain", mic_gain)
+	cfg.set_value("share", "gain", host_gain)
+	cfg.set_value("share", "mic_gain", mic_gain)
+	cfg.set_value("listen", "volume", volume)
+	cfg.set_value("listen", "balance", balance)
+	cfg.set_value("app", "ip", ip_edit.text)
+	cfg.set_value("app", "name", name_edit.text)
+	if dev_opt.selected >= 0:
+		cfg.set_value("share", "device", dev_opt.get_item_text(dev_opt.selected))
+	if mic_opt.selected >= 0:
+		cfg.set_value("share", "mic_device", mic_opt.get_item_text(mic_opt.selected))
 	cfg.save(CFG_PATH)
 
 
 # ---------------------------------------------------------------- UI
 
 func _build_ui() -> void:
+	var mobile := OS.has_feature("mobile")
 	theme = _make_theme()
 	var bg := ColorRect.new()
 	bg.color = C_BG
@@ -417,6 +448,7 @@ func _build_ui() -> void:
 	me.add_theme_constant_override("separation", 0)
 	root.add_child(me)
 	var hero := SpeakerHero.new()
+	hero.kind = 2 if mobile else 1
 	meter = hero
 	me.add_child(hero)
 	hero_name = _label("", me)
@@ -433,35 +465,15 @@ func _build_ui() -> void:
 	pill_txt = _label("", st)
 	pill_txt.add_theme_color_override("font_color", C_MUTED)
 
-	# --- Sélecteur de rôle (segmenté)
-	var seg := PanelContainer.new()
-	seg.add_theme_stylebox_override("panel", _sb(Color("#14161e"), 28, 4, 4))
-	seg.size_flags_horizontal = SIZE_SHRINK_CENTER
-	root.add_child(seg)
-	var rrow := HBoxContainer.new()
-	rrow.add_theme_constant_override("separation", 0)
-	seg.add_child(rrow)
-	var grp := ButtonGroup.new()
-	for r in [["host", "Ordinateur"], ["client", "Haut-parleur"]]:
-		var rb := _button(r[1], rrow)
-		rb.theme_type_variation = "Seg"
-		rb.toggle_mode = true
-		rb.button_group = grp
-		rb.custom_minimum_size.x = 128
-		rb.pressed.connect(func() -> void:
-			_set_mode(r[0])
-			_save())
-		role_btns[r[0]] = rb
-
-	# --- Un seul bouton principal
-	host_btn = _button("", root)
-	host_btn.pressed.connect(func() -> void:
-		if running: _stop()
-		else: _start_host())
-	client_btn = _button("", root)
-	client_btn.pressed.connect(func() -> void:
-		if running: _stop()
-		else: _start_client())
+	# --- Ce que je partage (tout est coupé au démarrage)
+	var card := PanelContainer.new()
+	root.add_child(card)
+	var cv := _vbox(card, 16)
+	if not mobile:
+		sw_snd = _switch_row(cv, "Partager mon son")
+		sw_snd.toggled.connect(func(on: bool) -> void: _on_share("snd", on))
+	sw_mic = _switch_row(cv, "Partager mon micro")
+	sw_mic.toggled.connect(func(on: bool) -> void: _on_share("mic", on))
 
 	# --- Appareils à proximité
 	list_title = _hint("Appareils à proximité", root)
@@ -519,92 +531,74 @@ func _build_ui() -> void:
 	var g0 := _vbox(gs, 8)
 	_hint("Nom de cet appareil", g0)
 	name_edit = LineEdit.new()
-	var saved_name: String = cfg.get_value("client", "name", "")
+	var saved_name: String = cfg.get_value("app", "name", "")
 	name_edit.text = "" if saved_name.is_valid_ip_address() else saved_name
 	if name_edit.text == "":
 		name_edit.text = _device_name()
 	g0.add_child(name_edit)
 
-	# Réglages du rôle Haut-parleur
-	host_rest = _vbox(gs, 24)
-	var hs := _vbox(host_rest, 8)
-	_hint("Source du son", hs)
-	var row := HBoxContainer.new()
-	row.add_theme_constant_override("separation", 8)
-	hs.add_child(row)
-	dev_opt = OptionButton.new()
-	dev_opt.size_flags_horizontal = SIZE_EXPAND_FILL
-	dev_opt.clip_text = true
-	row.add_child(dev_opt)
-	_button("↻", row).pressed.connect(_refresh_devices)
-	_slider_row(hs, "Gain d'envoi", 0, 200, host_gain * 100.0, func(x: float) -> String:
-		host_gain = x / 100.0
+	var gsh := _vbox(gs, 16)
+	_hint("Ce que je partage", gsh)
+	if not mobile:
+		var row := HBoxContainer.new()
+		row.add_theme_constant_override("separation", 8)
+		gsh.add_child(row)
+		dev_opt = OptionButton.new()
+		dev_opt.size_flags_horizontal = SIZE_EXPAND_FILL
+		dev_opt.clip_text = true
+		row.add_child(dev_opt)
+		_button("↻", row).pressed.connect(_refresh_devices)
+		_slider_row(gsh, "Gain du son", 0, 200, host_gain * 100.0, func(x: float) -> String:
+			host_gain = x / 100.0
+			return "%d %%" % roundi(x))
+		mic_opt = OptionButton.new()
+		mic_opt.clip_text = true
+		gsh.add_child(mic_opt)
+	else:
+		dev_opt = OptionButton.new()  # inutilisé sur téléphone
+		mic_opt = OptionButton.new()
+	_slider_row(gsh, "Gain du micro", 0, 300, mic_gain * 100.0, func(x: float) -> String:
+		mic_gain = x / 100.0
 		return "%d %%" % roundi(x))
-	vsink_lbl = _hint("", hs)
-	host_status = _hint("", hs)
-	var hc := _vbox(host_rest, 8)
-	_hint("Haut-parleurs connectés", hc)
-	no_client_lbl = _hint("Aucun pour l'instant.", hc)
-	clients_list = _vbox(hc, 8)
 
-	# Réglages du rôle Client
-	client_rest = _vbox(gs, 24)
-	var ce := _vbox(client_rest, 16)
-	_slider_row(ce, "Volume", 0, 150, volume * 100.0, func(x: float) -> String:
+	var gl := _vbox(gs, 16)
+	_hint("Ce que j'écoute", gl)
+	_slider_row(gl, "Volume", 0, 150, volume * 100.0, func(x: float) -> String:
 		volume = x / 100.0
 		return "%d %%" % roundi(x))
-	bal_slider = _slider_row(ce, "Balance", -100, 100, balance * 100.0, func(x: float) -> String:
+	bal_slider = _slider_row(gl, "Balance", -100, 100, balance * 100.0, func(x: float) -> String:
 		balance = x / 100.0
 		return "centre" if absf(x) < 1 else "%s %d %%" % ["D" if x > 0 else "G", roundi(absf(x))])
 	var brow := HBoxContainer.new()
-	ce.add_child(brow)
+	gl.add_child(brow)
 	var mute := CheckButton.new()
 	mute.text = "Muet"
 	mute.size_flags_horizontal = SIZE_EXPAND_FILL
 	mute.toggled.connect(func(on: bool) -> void: muted = on)
 	brow.add_child(mute)
 	_button("Centrer", brow).pressed.connect(func() -> void: bal_slider.value = 0)
-	var cm := _vbox(client_rest, 16)
-	var mic_chk := CheckButton.new()
-	mic_chk.text = "Partager mon micro"
-	mic_chk.button_pressed = send_mic
-	mic_chk.toggled.connect(func(on: bool) -> void:
-		send_mic = on
-		mic_box.visible = on
-		if running:
-			if on: _start_capture("Default")
-			else: _stop_capture())
-	cm.add_child(mic_chk)
-	mic_box = _vbox(cm, 16)
-	mic_box.visible = send_mic
-	_slider_row(mic_box, "Gain micro", 0, 300, mic_gain * 100.0, func(x: float) -> String:
-		mic_gain = x / 100.0
-		return "%d %%" % roundi(x))
-	mic_box.add_child(Spectrum.new("Capture", 48.0))
-	_hint("Casque conseillé pour éviter l'écho.", mic_box)
-	ip_box = _vbox(client_rest, 8)
-	_hint("Adresse de l'ordinateur", ip_box)
+	vsink_lbl = _hint("", gl)
+
+	var gi := _vbox(gs, 8)
+	_hint("Adresse d'un appareil non détecté", gi)
 	ip_edit = LineEdit.new()
 	ip_edit.placeholder_text = "192.168.1.x"
-	ip_edit.text = cfg.get_value("client", "ip", "")
-	ip_box.add_child(ip_edit)
-	ip_edit.text_submitted.connect(func(_t: String) -> void:
-		if not running: _start_client())
-	client_status = _hint("", client_rest)
-
-	# QR de l'appli Android (PC, quel que soit le rôle)
-	if not OS.has_feature("mobile"):
-		var qb := _vbox(gs, 8)
-		_hint("Appli Android", qb)
+	ip_edit.text = cfg.get_value("app", "ip", "")
+	gi.add_child(ip_edit)
+	if not mobile:
+		var qh := HBoxContainer.new()
+		qh.add_theme_constant_override("separation", 16)
+		gs.add_child(qh)
 		var qr := TextureRect.new()
 		qr.texture = load("res://qr_apk.svg")
 		qr.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
 		qr.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
 		qr.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
-		qr.custom_minimum_size = Vector2(150, 150)
-		qr.size_flags_horizontal = SIZE_SHRINK_BEGIN
-		qb.add_child(qr)
-		_hint("Scanne ce code avec le téléphone pour télécharger l'APK.", qb)
+		qr.custom_minimum_size = Vector2(88, 88)
+		qh.add_child(qr)
+		var qv := _hint("Appli Android", qh)
+		qv.size_flags_vertical = SIZE_SHRINK_CENTER
+		qv.autowrap_mode = TextServer.AUTOWRAP_OFF
 
 	# Version et mise à jour
 	upd_card = PanelContainer.new()
@@ -619,10 +613,21 @@ func _build_ui() -> void:
 	upd_btn.theme_type_variation = "Tab"
 	upd_btn.toggle_mode = false
 	upd_btn.pressed.connect(_do_update)
-	_set_run_btn(host_btn, false)
-	_set_run_btn(client_btn, false)
 	get_tree().root.size_changed.connect(_fit)
 	_fit()
+
+
+## Ligne « titre ........ interrupteur » ; renvoie l'interrupteur.
+func _switch_row(parent: Node, text: String) -> Switch:
+	var r := HBoxContainer.new()
+	parent.add_child(r)
+	var l := _label(text, r)
+	l.add_theme_font_size_override("font_size", 17)
+	l.size_flags_horizontal = SIZE_EXPAND_FILL
+	l.size_flags_vertical = SIZE_SHRINK_CENTER
+	var sw := Switch.new()
+	r.add_child(sw)
+	return sw
 
 
 func _open_drawer(on: bool) -> void:
@@ -630,6 +635,8 @@ func _open_drawer(on: bool) -> void:
 	if on:
 		drawer.modulate.a = 0.0
 		create_tween().tween_property(drawer, "modulate:a", 1.0, 0.15)
+	else:
+		_save()
 
 
 ## Colonne de 420 px max centrée sur PC, pleine largeur sur téléphone.
@@ -868,43 +875,36 @@ func _slider_row(parent: Node, title: String, mn: float, mx: float, val: float, 
 	return s
 
 
-func _set_run_btn(b: Button, on: bool) -> void:
-	b.theme_type_variation = "Danger" if on else "Primary"
-	if b == host_btn:
-		b.text = "Arrêter" if on else "Démarrer"
-	else:
-		b.text = "Se déconnecter" if on else "Rejoindre"
-
-
-func _set_mode(m: String) -> void:
-	if running and m != mode:
-		_stop()
-	mode = m
-	host_btn.visible = m == "host"
-	client_btn.visible = m == "client" and running
-	meter.kind = 0 if m == "client" else 1
-	host_rest.visible = m == "host"
-	client_rest.visible = m == "client"
-	role_btns[m].button_pressed = true
-	peers_sig = ""
-	if m == "host":
-		_refresh_devices()
-
-
 func _refresh_devices() -> void:
-	var saved: String = cfg.get_value("host", "device", "")
+	if OS.has_feature("mobile"):
+		return
+	var saved: String = cfg.get_value("share", "device", "")
+	var saved_mic: String = cfg.get_value("share", "mic_device", "")
 	if dev_opt.selected >= 0:
 		saved = dev_opt.get_item_text(dev_opt.selected)
+	if mic_opt.selected >= 0:
+		saved_mic = mic_opt.get_item_text(mic_opt.selected)
 	dev_opt.clear()
+	mic_opt.clear()
 	var pick := -1
+	var pick_mic := -1
 	for d in AudioServer.get_input_device_list():
 		dev_opt.add_item(d)
+		mic_opt.add_item(d)
 		var i := dev_opt.item_count - 1
+		var mon := d.to_lower().contains("monitor")
+		# Son partagé : le moniteur de la sortie (PULSE_SOURCE via sound-link.sh = « Default »)
 		if d == saved:
 			pick = i
-		elif pick == -1 and saved == "" and d.to_lower().contains("monitor"):
+		elif pick == -1 and saved == "" and mon:
 			pick = i
+		# Micro : un vrai micro, jamais un moniteur ni « Default » (= moniteur ici)
+		if d == saved_mic:
+			pick_mic = i
+		elif pick_mic == -1 and saved_mic == "" and not mon and d != "Default":
+			pick_mic = i
 	dev_opt.select(maxi(pick, 0))
+	mic_opt.select(maxi(pick_mic, 0))
 
 
 # ---------------------------------------------------------------- Bus audio
@@ -950,128 +950,202 @@ func _stop_capture() -> void:
 		mic_player = null
 
 
-# ---------------------------------------------------------------- Start / stop
+# ---------------------------------------------------------------- Partage (ce que j'envoie)
 
-func _start_host() -> void:
-	if udp.bind(PORT) != OK:
-		host_status.text = "Port %d indisponible." % PORT
+## Une seule capture à la fois : son de l'appareil (PC) ou micro.
+func _on_share(kind: String, on: bool) -> void:
+	if not on:
+		if cap_kind == kind:
+			_stop_capture()
+			cap_kind = ""
 		return
-	var dev := dev_opt.get_item_text(dev_opt.selected) if dev_opt.selected >= 0 else "Default"
-	cfg.set_value("host", "device", dev)
-	_start_capture(dev)
-	# Les micros reçus sont joués dans le micro virtuel, jamais sur les haut-parleurs (boucle).
-	vsink_ok = VSINK in AudioServer.get_output_device_list()
-	if vsink_ok:
-		AudioServer.output_device = VSINK
-	vsink_lbl.text = ("Micros reçus → micro virtuel « Sound-Link-Micro » (à choisir dans Discord, OBS…)." if vsink_ok
-		else "Micro virtuel absent : lancer via sound-link.sh pour utiliser les micros des clients (spectre seul).")
-	seq = 0
-	running = true
-	_set_run_btn(host_btn, true)
-
-
-func _start_client() -> void:
-	var ip := ip_edit.text.strip_edges()
-	if not ip.is_valid_ip_address():
-		ip = IP.resolve_hostname(ip, IP.TYPE_IPV4)
-	if ip == "":
-		client_status.text = "Adresse invalide."
-		return
-	if udp.bind(0) != OK:
-		client_status.text = "Impossible d'ouvrir le réseau."
-		return
-	udp.set_dest_address(ip, PORT)
-	rx = RxStream.new(self, true, 0)
-	running = true
-	hello_t = 0.0
-	mic_seq = 0
-	if send_mic:
-		_start_capture("Default")
-	_set_run_btn(client_btn, true)
-	_save()
-
-
-func _stop() -> void:
-	if running and mode == "client":
-		udp.put_packet("BYE".to_ascii_buffer())
-	running = false
-	udp.close()
+	var other: Switch = sw_mic if kind == "snd" else sw_snd
+	if other:
+		other.set_on(false)
 	_stop_capture()
-	if rx:
-		rx.free_player()
-		rx = null
-	for k in clients.keys():
-		_remove_client(k)
-	if mode == "host" and vsink_ok:
-		AudioServer.output_device = "Default"
-		vsink_ok = false
-	if host_btn:
-		_set_run_btn(host_btn, false)
-		_set_run_btn(client_btn, false)
+	var dev := "Default"
+	if not OS.has_feature("mobile"):
+		var opt := dev_opt if kind == "snd" else mic_opt
+		if opt.selected >= 0:
+			dev = opt.get_item_text(opt.selected)
+	cap_kind = kind
+	seq = 0
+	_start_capture(dev)
 
 
-# ---------------------------------------------------------------- Clients (host)
-
-func _add_client(key: String, ip: String, port: int, cname: String, now: float) -> Dictionary:
-	bus_id += 1
-	var bus := "Mic%d" % bus_id
-	AudioServer.set_bus_mute(_make_bus(bus, [AudioEffectSpectrumAnalyzer.new()]), true)  # jamais sur les enceintes
-	var c := {"ip": ip, "port": port, "t": now, "bus": bus, "rx": null, "muted": false}
-
-	var panel := PanelContainer.new()
-	panel.add_theme_stylebox_override("panel", _sb(C_FIELD, 12, 12, 10, C_BORDER))
-	clients_list.add_child(panel)
-	var v := VBoxContainer.new()
-	v.add_theme_constant_override("separation", 8)
-	panel.add_child(v)
-	var top := HBoxContainer.new()
-	v.add_child(top)
-	var dot := _label("●", top)
-	var nm := _label(cname if cname != "" else ip, top)
-	nm.add_theme_font_size_override("font_size", 16)
-	nm.size_flags_horizontal = SIZE_EXPAND_FILL
-	nm.clip_text = true
-	nm.tooltip_text = key
-	var info := _hint("", top)
-	info.autowrap_mode = TextServer.AUTOWRAP_OFF
-	var mb := _button("Micro on", top)
-	mb.toggle_mode = true
-	mb.add_theme_font_size_override("font_size", 13)
-	mb.toggled.connect(func(off: bool) -> void:
-		c["muted"] = off
-		mb.text = "Micro off" if off else "Micro on")
-	v.add_child(Spectrum.new(bus, 52.0))
-	var vs := _slider(0, 200, 100, v)
-	vs.tooltip_text = "Volume de ce micro"
-	vs.value_changed.connect(func(x: float) -> void: AudioServer.set_bus_volume_db(
-		AudioServer.get_bus_index(bus), linear_to_db(maxf(x / 100.0, 0.0001))))
-
-	c["panel"] = panel
-	c["name"] = nm
-	c["dot"] = dot
-	c["info"] = info
-	clients[key] = c
-	return c
+## Envoie ce qui est capturé aux appareils qui m'écoutent ; renvoie les crêtes (L, R).
+func _share_process(now: float) -> Vector2:
+	for k in subs.keys():
+		if now - subs[k]["t"] > TIMEOUT:
+			subs.erase(k)
+	if mic_player == null or cap_kind == "":
+		return Vector2.ZERO
+	var rate := int(AudioServer.get_mix_rate())
+	var pl := 0.0
+	var pr := 0.0
+	while capture.get_frames_available() >= FRAMES_PER_PACKET:
+		var frames := capture.get_buffer(FRAMES_PER_PACKET)
+		var snd := cap_kind == "snd"
+		var pkt := (SND_TAG if snd else MIC_TAG).to_ascii_buffer()
+		pkt.resize(12 + FRAMES_PER_PACKET * (4 if snd else 2))
+		pkt.encode_u32(4, seq)
+		pkt.encode_u32(8, rate)
+		seq = (seq + 1) & 0xFFFFFFFF
+		var o := 12
+		for f in frames:
+			if snd:
+				var l := clampf(f.x * host_gain, -1.0, 1.0)
+				var r := clampf(f.y * host_gain, -1.0, 1.0)
+				pl = maxf(pl, absf(l))
+				pr = maxf(pr, absf(r))
+				pkt.encode_s16(o, int(l * 32767.0))
+				pkt.encode_s16(o + 2, int(r * 32767.0))
+				o += 4
+			else:
+				var m := clampf((f.x + f.y) * 0.5 * mic_gain, -1.0, 1.0)
+				pl = maxf(pl, absf(m))
+				pkt.encode_s16(o, int(m * 32767.0))
+				o += 2
+		for s in subs.values():
+			udp.set_dest_address(s["ip"], s["port"])
+			udp.put_packet(pkt)
+	return Vector2(pl, maxf(pl, pr))
 
 
-func _remove_client(key: String) -> void:
-	var c: Dictionary = clients.get(key, {})
-	if c.is_empty():
+# ---------------------------------------------------------------- Écoute (ce que je reçois)
+
+func _listened(ip: String, port: int) -> bool:
+	for id in listening:
+		var p: Dictionary = peers.get(id, {})
+		if not p.is_empty() and p["ip"] == ip and p["port"] == port:
+			return true
+	return false
+
+
+func _toggle_listen(id: String) -> void:
+	if listening.has(id):
+		_unlisten(id)
+		listening.erase(id)
+	else:
+		listening[id] = true
+		sub_t = 0.0
+	peers_sig = ""
+
+
+func _unlisten(id: String) -> void:
+	var p: Dictionary = peers.get(id, {})
+	if p.is_empty():
 		return
-	if c["rx"]:
-		c["rx"].free_player()
-	c["panel"].queue_free()
-	_remove_bus(c["bus"])
-	clients.erase(key)
+	udp.set_dest_address(p["ip"], p["port"])
+	udp.put_packet("BYE".to_ascii_buffer())
+	_free_rx("%s:%d" % [p["ip"], p["port"]])
+
+
+func _free_rx(key: String) -> void:
+	var e: Dictionary = rxs.get(key, {})
+	if e.is_empty():
+		return
+	for t in ["snd", "mic"]:
+		if e[t]:
+			e[t].free_player()
+	if e["bus"] != "":
+		_remove_bus(e["bus"])
+	rxs.erase(key)
+
+
+## Réception réseau : abonnements (SUB/BYE) et flux audio des appareils écoutés.
+func _recv_process(now: float) -> void:
+	while udp.get_available_packet_count() > 0:
+		var pkt := udp.get_packet()
+		var ip := udp.get_packet_ip()
+		var port := udp.get_packet_port()
+		var key := "%s:%d" % [ip, port]
+		if pkt.size() > 12:
+			var tag := pkt.slice(0, 4).get_string_from_ascii()
+			if tag == SND_TAG or tag == MIC_TAG:
+				if not _listened(ip, port):
+					continue
+				if not rxs.has(key):
+					rxs[key] = {"snd": null, "mic": null, "bus": ""}
+				var e: Dictionary = rxs[key]
+				if tag == SND_TAG:
+					if e["snd"] == null:
+						e["snd"] = RxStream.new(self, true, 4)
+					e["snd"].receive(pkt, now)
+				else:
+					if e["mic"] == null:
+						bus_id += 1
+						e["bus"] = "Mic%d" % bus_id
+						AudioServer.set_bus_mute(_make_bus(e["bus"], []), true)  # jamais sur les enceintes
+						e["mic"] = RxStream.new(self, false, 4, e["bus"])
+					e["mic"].receive(pkt, now)
+				continue
+		var msg := pkt.get_string_from_utf8()
+		if msg.begins_with("SUB|"):
+			subs[key] = {"ip": ip, "port": port, "t": now}
+		elif msg == "BYE":
+			subs.erase(key)
+
+
+## Joue les flux reçus. Le micro reçu va UNIQUEMENT dans le micro virtuel (sortie = soundlink_sink) ;
+## le son reçu est joué sur la sortie par défaut, et coupé tant que la sortie est le micro virtuel.
+func _play_process(now: float) -> Vector2:
+	var any_mic := false
+	for k in rxs.keys():
+		var e: Dictionary = rxs[k]
+		var last := -100.0
+		for t in ["snd", "mic"]:
+			if e[t]:
+				last = maxf(last, e[t].last_rx)
+		if now - last > TIMEOUT:
+			_free_rx(k)
+		elif e["mic"] and now - e["mic"].last_rx < 1.0:
+			any_mic = true
+	var want_v := vsink_exists and any_mic
+	var in_v := AudioServer.output_device == VSINK
+	if want_v and not in_v:
+		AudioServer.output_device = VSINK
+	elif not want_v and in_v:
+		for e in rxs.values():
+			if e["bus"] != "":
+				AudioServer.set_bus_mute(AudioServer.get_bus_index(e["bus"]), true)
+		AudioServer.output_device = "Default"
+	in_v = AudioServer.output_device == VSINK
+	var gl := 0.0
+	var gr := 0.0
+	if not muted and not in_v:
+		var v := volume * volume / 32768.0  # courbe perceptive
+		gl = v * minf(1.0, 1.0 - balance)
+		gr = v * minf(1.0, 1.0 + balance)
+	var peak := Vector2.ZERO
+	for e in rxs.values():
+		if e["snd"]:
+			peak = peak.max(e["snd"].pump(gl, gr))
+		if e["mic"]:
+			AudioServer.set_bus_mute(AudioServer.get_bus_index(e["bus"]), not in_v)
+			e["mic"].pump(1.0 / 32768.0, 1.0 / 32768.0)
+	return peak
+
+
+func _subscribe_process(delta: float) -> void:
+	sub_t -= delta
+	if sub_t > 0.0:
+		return
+	sub_t = 1.0
+	for id in listening:
+		var p: Dictionary = peers.get(id, {})
+		if not p.is_empty():
+			udp.set_dest_address(p["ip"], p["port"])
+			udp.put_packet(("SUB|%s" % my_id).to_utf8_buffer())
 
 
 # ---------------------------------------------------------------- Boucle
 
 func _process(delta: float) -> void:
 	var now := Time.get_ticks_msec() / 1000.0
-	var peaks := Vector2.ZERO
-	if running:
-		peaks = _host_process(now) if mode == "host" else _client_process(now, delta)
+	_recv_process(now)
+	var peaks := _share_process(now).max(_play_process(now))
+	_subscribe_process(delta)
 	level_l = maxf(level_l * 0.88, peaks.x)
 	level_r = maxf(level_r * 0.88, peaks.y)
 	meter.set_levels(sqrt(level_l), sqrt(level_r))
@@ -1079,127 +1153,24 @@ func _process(delta: float) -> void:
 	_update_status(now)
 
 
-func _host_process(now: float) -> Vector2:
-	while udp.get_available_packet_count() > 0:
-		var pkt := udp.get_packet()
-		var ip := udp.get_packet_ip()
-		var port := udp.get_packet_port()
-		var key := "%s:%d" % [ip, port]
-		if pkt.size() > 12 and pkt.slice(0, 4).get_string_from_ascii() == MIC_TAG:
-			var c: Dictionary = clients[key] if clients.has(key) else _add_client(key, ip, port, ip, now)
-			c["t"] = now
-			if c["rx"] == null:
-				c["rx"] = RxStream.new(self, false, 4, c["bus"])
-			c["rx"].receive(pkt, now)
-			continue
-		var msg := pkt.get_string_from_ascii()
-		if msg.begins_with("HELLO"):
-			var cname := msg.substr(6).strip_edges() if msg.length() > 6 else ""
-			if clients.has(key):
-				clients[key]["t"] = now
-				if cname != "":
-					clients[key]["name"].text = cname
-			else:
-				_add_client(key, ip, port, cname, now)
-		elif msg == "BYE":
-			_remove_client(key)
-	for k in clients.keys():
-		if now - clients[k]["t"] > TIMEOUT:
-			_remove_client(k)
-
-	# Micros reçus -> sortie (micro virtuel)
-	for c in clients.values():
-		var idx := AudioServer.get_bus_index(c["bus"])
-		AudioServer.set_bus_mute(idx, c["muted"] or not vsink_ok or AudioServer.output_device != VSINK)
-		var talking := false
-		var r: RxStream = c["rx"]
-		if r:
-			r.pump(1.0 / 32768.0, 1.0 / 32768.0)
-			talking = now - r.last_rx < 1.0
-		c["dot"].add_theme_color_override("font_color", C_OK if talking else C_MUTED)
-		c["info"].text = ("micro %d ms" % r.latency_ms()) if talking else "écoute"
-
-	# Source -> clients
-	var rate := int(AudioServer.get_mix_rate())
-	var pl := 0.0
-	var pr := 0.0
-	while capture.get_frames_available() >= FRAMES_PER_PACKET:
-		var frames := capture.get_buffer(FRAMES_PER_PACKET)
-		var pkt := PackedByteArray()
-		pkt.resize(8 + FRAMES_PER_PACKET * 4)
-		pkt.encode_u32(0, seq)
-		pkt.encode_u32(4, rate)
-		seq = (seq + 1) & 0xFFFFFFFF
-		var o := 8
-		for f in frames:
-			var l := clampf(f.x * host_gain, -1.0, 1.0)
-			var r := clampf(f.y * host_gain, -1.0, 1.0)
-			pl = maxf(pl, absf(l))
-			pr = maxf(pr, absf(r))
-			pkt.encode_s16(o, int(l * 32767.0))
-			pkt.encode_s16(o + 2, int(r * 32767.0))
-			o += 4
-		for c in clients.values():
-			udp.set_dest_address(c["ip"], c["port"])
-			udp.put_packet(pkt)
-	return Vector2(pl, pr)
-
-
-func _client_process(now: float, delta: float) -> Vector2:
-	hello_t -= delta
-	if hello_t <= 0.0:
-		udp.put_packet(("HELLO " + name_edit.text.strip_edges()).to_utf8_buffer())
-		hello_t = 1.0
-
-	# Micro -> host
-	if mic_player:
-		var rate := int(AudioServer.get_mix_rate())
-		while capture.get_frames_available() >= FRAMES_PER_PACKET:
-			var frames := capture.get_buffer(FRAMES_PER_PACKET)
-			var pkt := MIC_TAG.to_ascii_buffer()
-			pkt.resize(12 + FRAMES_PER_PACKET * 2)
-			pkt.encode_u32(4, mic_seq)
-			pkt.encode_u32(8, rate)
-			mic_seq = (mic_seq + 1) & 0xFFFFFFFF
-			var o := 12
-			for f in frames:
-				pkt.encode_s16(o, int(clampf((f.x + f.y) * 0.5 * mic_gain, -1.0, 1.0) * 32767.0))
-				o += 2
-			udp.put_packet(pkt)
-
-	# Host -> haut-parleur
-	while udp.get_available_packet_count() > 0:
-		rx.receive(udp.get_packet(), now)
-	var gl := 0.0
-	var gr := 0.0
-	if not muted:
-		var v := volume * volume / 32768.0  # courbe perceptive
-		gl = v * minf(1.0, 1.0 - balance)
-		gr = v * minf(1.0, 1.0 + balance)
-	return rx.pump(gl, gr)
-
-
 func _update_status(now: float) -> void:
-	var live := running and (mode == "host" or now - rx.last_rx < 2.0)
-	pill_dot.add_theme_color_override("font_color", C_OK if live else (Color("#fbbf24") if running else C_MUTED))
-	meter.state = 2 if live else (1 if running else 0)
-	if mode == "host":
-		pill_txt.text = "Envoi du son" if live else "Prêt"
-	else:
-		pill_txt.text = ("Connecté à " + _peer_name(ip_edit.text.strip_edges())) if live else ("Connexion…" if running else "En attente d'un ordinateur")
-	client_btn.visible = mode == "client" and running
+	var receiving := false
+	for e in rxs.values():
+		for t in ["snd", "mic"]:
+			if e[t] and now - e[t].last_rx < 1.0:
+				receiving = true
+	var sharing := cap_kind != ""
+	meter.state = 2 if (sharing or receiving) else (1 if not listening.is_empty() else 0)
+	pill_dot.add_theme_color_override("font_color", C_OK if meter.state == 2 else (Color("#fbbf24") if meter.state == 1 else C_MUTED))
+	var txt := "Rien n'est partagé"
+	if sharing:
+		txt = "Partage mon " + ("son" if cap_kind == "snd" else "micro")
+	if receiving:
+		txt = ("J'écoute" if not sharing else txt + ", j'écoute")
+	pill_txt.text = txt
 	hero_name.text = _my_name()
-	no_client_lbl.visible = clients.is_empty()
-	if mode == "host":
-		host_status.text = "" if not running else "%d appareil(s) connecté(s)" % clients.size()
-		if not running:
-			vsink_lbl.text = ""
-	elif not running:
-		client_status.text = ""
-	elif now - rx.last_rx > 2.0:
-		client_status.text = "En attente de l'ordinateur… (pare-feu UDP %d)" % PORT
-	else:
-		client_status.text = "%d Hz, tampon ~%d ms, perdus : %d" % [rx.rate, rx.latency_ms(), rx.lost]
+	vsink_lbl.text = "Micros reçus : uniquement dans « Sound-Link-Micro »." if vsink_exists \
+		else "Micro virtuel absent (sound-link.sh) : les micros reçus restent muets."
 
 
 func _local_ips() -> String:
@@ -1293,97 +1264,61 @@ func _on_pck(result: int, code: int, _h: PackedStringArray, _b: PackedByteArray)
 		upd_btn.visible = false
 
 
-# ---------------------------------------------------------------- Accueil / modes
+# ---------------------------------------------------------------- Découverte des appareils
 
-# ---------------------------------------------------------------- Découverte du host
-
-## Chaque instance annonce en broadcast son nom, son rôle et son état ; on liste les autres.
 func _my_name() -> String:
 	var n := name_edit.text.strip_edges()
 	return n if n != "" else _device_name()
 
 
-func _peer_name(ip: String) -> String:
-	for p in peers.values():
-		if p["ip"] == ip and p["role"] == "host":
-			return p["name"]
-	return ip
-
-
+## Chaque instance annonce en broadcast : id, port, ce qu'elle partage, nom. On ignore son propre id.
 func _discovery(now: float, delta: float) -> void:
 	if not disc.is_bound():
-		if disc.bind(DISC_PORT) != OK:
+		if disc.bind(disc_port) != OK:
 			return
 		disc.set_broadcast_enabled(true)
 	beacon_t -= delta
 	if beacon_t <= 0.0:
 		beacon_t = 1.0
-		var st := "1" if running else "0"
-		var msg := ("%s|%s|%s|%s|%s" % [BEACON2, my_id, mode, st, _my_name().replace("|", " ")]).to_utf8_buffer()
+		vsink_exists = VSINK in AudioServer.get_output_device_list()
+		var flags := ("1" if cap_kind == "snd" else "0") + ("1" if cap_kind == "mic" else "0")
+		var msg := ("%s|%s|%d|%s|%s" % [BEACON, my_id, data_port, flags, _my_name().replace("|", " ")]).to_utf8_buffer()
 		for b in _broadcast_addrs():
-			disc.set_dest_address(b, DISC_PORT)
+			disc.set_dest_address(b, disc_port)
 			disc.put_packet(msg)
-			if mode == "host" and running:
-				disc.put_packet(BEACON.to_ascii_buffer())
 	while disc.get_available_packet_count() > 0:
 		var parts := disc.get_packet().get_string_from_utf8().split("|", true, 4)
 		var ip := disc.get_packet_ip()
-		if parts[0] == INVITE and parts.size() >= 2 and parts[1] != my_id:
-			if mode == "client" and not (running and ip_edit.text.strip_edges() == ip):
-				if running:
-					_stop()
-				ip_edit.text = ip
-				_start_client()
+		if parts.size() < 5 or parts[0] != BEACON or parts[1] == my_id:
 			continue
-		if parts.size() < 5 or parts[0] != BEACON2 or parts[1] == my_id:
-			continue
-		peers[parts[1]] = {"ip": ip, "role": parts[2], "state": parts[3], "name": parts[4], "t": now}
+		peers[parts[1]] = {"ip": ip, "port": parts[2].to_int(), "snd": parts[3].substr(0, 1) == "1",
+			"mic": parts[3].substr(1, 1) == "1", "name": parts[4], "t": now}
+	var man := ip_edit.text.strip_edges()
+	if man.is_valid_ip_address():  # appareil ajouté à la main (Réglages)
+		peers["manual"] = {"ip": man, "port": data_port, "snd": false, "mic": false, "name": man, "t": now}
+	else:
+		peers.erase("manual")
 	for k in peers.keys():
 		if now - peers[k]["t"] > 4.0:
 			peers.erase(k)
-	var sig := "%s|%s|%s|%d" % [mode, running, ip_edit.text, clients.size()]
+	var sig := "%s" % [listening.keys()]
 	for k in peers:
-		sig += "|%s%s%s%s" % [k, peers[k]["name"], peers[k]["role"], peers[k]["state"]]
+		sig += "|%s%s%s%s" % [k, peers[k]["name"], peers[k]["snd"], peers[k]["mic"]]
 	if sig != peers_sig:
 		peers_sig = sig
 		_rebuild_peers()
 
 
-## La source invite un haut-parleur : il répond en se connectant (HELLO).
-func _invite(ip: String) -> void:
-	if not running:
-		_start_host()
-	if not running:
-		return
-	disc.set_dest_address(ip, DISC_PORT)
-	disc.put_packet(("%s|%s" % [INVITE, my_id]).to_utf8_buffer())
-
-
 func _rebuild_peers() -> void:
 	for ch in found_list.get_children():
 		ch.queue_free()
-	var cur := ip_edit.text.strip_edges()
-	var joinable := false
 	for k in peers:
 		var p: Dictionary = peers[k]
-		var is_host: bool = p["role"] == "host"
-		var can := mode == "host" and not is_host  # la source touche un haut-parleur
-		var link := false
-		if can:
-			for c in clients.values():
-				link = link or c["ip"] == p["ip"]
-		elif mode == "client" and is_host:
-			link = running and p["ip"] == cur
-		joinable = joinable or (can and not link)
+		var on := listening.has(k)
 		var b := Button.new()
 		b.theme_type_variation = "Row"
 		b.custom_minimum_size.y = 48
-		if can:
-			var ip: String = p["ip"]
-			b.pressed.connect(func() -> void: _invite(ip))
-		else:
-			b.mouse_filter = MOUSE_FILTER_IGNORE
-			b.focus_mode = Control.FOCUS_NONE
+		b.pressed.connect(_toggle_listen.bind(k))
 		found_list.add_child(b)
 		var m := MarginContainer.new()
 		m.set_anchors_preset(PRESET_FULL_RECT)
@@ -1398,20 +1333,25 @@ func _rebuild_peers() -> void:
 		var dot := _label("●", h)
 		dot.add_theme_font_size_override("font_size", 10)
 		dot.size_flags_vertical = SIZE_SHRINK_CENTER
-		dot.add_theme_color_override("font_color", C_OK if (p["state"] == "1" or link) else C_MUTED)
+		dot.add_theme_color_override("font_color", C_OK if on else C_MUTED)
 		var nm := _label(p["name"], h)
 		nm.size_flags_horizontal = SIZE_EXPAND_FILL
 		nm.size_flags_vertical = SIZE_SHRINK_CENTER
 		nm.clip_text = true
-		var role := "Ordinateur" if is_host else "Haut-parleur"
-		var rl := _hint(role + (", connecté" if link else ""), h)
+		var what: PackedStringArray = []
+		if p["snd"]:
+			what.append("son")
+		if p["mic"]:
+			what.append("micro")
+		var rl := _hint(", ".join(what) if not what.is_empty() else "ne partage rien", h)
 		rl.size_flags_vertical = SIZE_SHRINK_CENTER
 		rl.autowrap_mode = TextServer.AUTOWRAP_OFF
+		rl.add_theme_color_override("font_color", C_ACCENT if on else C_MUTED)
 		for lb in [nm, dot, rl]:
 			lb.mouse_filter = MOUSE_FILTER_IGNORE
 	found_lbl.visible = peers.is_empty()
-	found_lbl.text = "Aucun autre appareil pour l'instant"
-	list_title.text = "Touchez un haut-parleur pour lui envoyer le son" if joinable else "Appareils à proximité"
+	found_lbl.text = "Aucun autre appareil détecté"
+	list_title.text = "Touchez un appareil pour l'écouter" if (not peers.is_empty() and listening.is_empty()) else "Appareils à proximité"
 
 
 func _broadcast_addrs() -> PackedStringArray:
