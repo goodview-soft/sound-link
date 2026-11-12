@@ -93,7 +93,7 @@ def write_in_game_chat(text, key=None, minlen=3):
 
 # ---------------------------------------------------------------- Musique : fichier YouTube -> micro virtuel + paroles (LRC) dans le chat
 MDIR = os.path.expanduser("~/.local/share/sound-link/music")
-music = {"sel": "", "playing": "", "status": "", "write": True, "ptt": True, "stop": threading.Event(), "proc": None}
+music = {"sel": "", "playing": "", "status": "", "write": True, "ptt": True, "local": True, "stop": threading.Event(), "proc": None}
 
 
 def music_tracks():
@@ -198,6 +198,9 @@ def music_play(vid):
             music["status"] = "Lecture (F9 pour arrêter)"
             proc = subprocess.Popen(["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", f], env=env)
             music["proc"] = proc
+            if music["local"]:  # on l'entend aussi sur les enceintes
+                loc = subprocess.Popen(["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", f])
+                music["loc"] = loc
             t0 = time.time() + 0.3  # démarrage de ffplay
             if music["write"]:
                 for ts, txt in lines:
@@ -220,6 +223,9 @@ def music_play(vid):
         finally:
             if proc and proc.poll() is None:
                 proc.terminate()
+            loc = music.get("loc")
+            if loc and loc.poll() is None:
+                loc.terminate()
             if music["ptt"]:
                 press_ptt(False)
             music["playing"] = ""
@@ -233,6 +239,9 @@ def music_stop():
     p = music["proc"]
     if p and p.poll() is None:
         p.terminate()
+    loc = music.get("loc")
+    if loc and loc.poll() is None:
+        loc.terminate()
 
 
 def music_toggle():
@@ -297,6 +306,8 @@ class Api(BaseHTTPRequestHandler):
                     pass
         if "write" in q:
             music["write"] = q["write"][0] == "1"
+        if "local" in q:
+            music["local"] = q["local"][0] == "1"
         if "ptt" in q:
             music["ptt"] = q["ptt"][0] == "1"
         return self.json({"ok": True})

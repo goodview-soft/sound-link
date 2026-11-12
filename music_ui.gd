@@ -41,7 +41,7 @@ func build(card: VBoxContainer) -> void:
 	_play.text = "Lancer (F9)"
 	_play.pressed.connect(func() -> void: _send("toggle=1"))
 	card.add_child(_play)
-	for o in [["Écrire les paroles dans le chat du jeu (Entrée, ligne, Entrée)", "write"], ["Maintenir la touche radio (MAJ) pendant la musique", "ptt"]]:
+	for o in [["Écrire les paroles dans le chat du jeu (Entrée, ligne, Entrée)", "write"], ["Maintenir la touche radio (MAJ) pendant la musique", "ptt"], ["Je l'entends aussi sur mes enceintes", "local"]]:
 		var c := CheckButton.new()
 		c.text = o[0]
 		c.button_pressed = true
