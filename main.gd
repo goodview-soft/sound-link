@@ -16,6 +16,7 @@ const VERSION: String = preload("res://version.gd").VERSION
 const UPDATE_URL := "https://github.com/goodview-soft/sound-link/releases/latest/download/version.json"
 const DISC_PORT := 4243
 const BEACON := "SOUNDLINK1"  # ancien format (hosts), toujours émis pour les anciennes versions
+const INVITE := "SL2INV"  # SL2INV|id : la source invite un haut-parleur à se connecter
 const BEACON2 := "SL2"  # SL2|id|rôle|état|nom
 const RELEASES_URL := "https://github.com/goodview-soft/sound-link/releases/latest"
 
@@ -272,6 +273,7 @@ class SpeakerHero extends Control:
 	## Haut-parleur central : disque + anneaux qui suivent le niveau sonore.
 	var level := 0.0
 	var shown := 0.0
+	var kind := 0  # 0 haut-parleur, 1 ordinateur
 	var state := 0  # 0 arrêté, 1 connexion, 2 actif
 	var t := 0.0
 
@@ -299,6 +301,12 @@ class SpeakerHero extends Control:
 		draw_circle(c, base, Color("#161821"))
 		draw_arc(c, base, 0, TAU, 72, Color(col, 0.95 if on else 0.4), 2.0, true)
 		var fg := Color("#f4efe6") if state > 0 else Color("#7d8497")
+		if kind == 1:
+			draw_rect(Rect2(c + Vector2(-24, -20), Vector2(48, 31)), fg)
+			draw_rect(Rect2(c + Vector2(-20, -16), Vector2(40, 23)), Color("#161821"))
+			draw_rect(Rect2(c + Vector2(-3, 11), Vector2(6, 8)), fg)
+			draw_rect(Rect2(c + Vector2(-12, 19), Vector2(24, 3)), fg)
+			return
 		draw_colored_polygon(PackedVector2Array([c + Vector2(-22, -9), c + Vector2(-10, -9), c + Vector2(6, -21),
 			c + Vector2(6, 21), c + Vector2(-10, 9), c + Vector2(-22, 9)]), fg)
 		draw_arc(c + Vector2(6, 0), 12, -0.85, 0.85, 12, fg, 2.6, true)
@@ -348,7 +356,7 @@ func _ready() -> void:
 	_build_ui()
 	if not OS.has_feature("mobile"):
 		get_window().min_size = Vector2i(380, 640)
-	_set_mode(cfg.get_value("app", "mode", "client"))
+	_set_mode(cfg.get_value("app", "mode", "client" if OS.get_name() == "Android" else "host"))
 	_check_update()
 
 
@@ -434,7 +442,7 @@ func _build_ui() -> void:
 	rrow.add_theme_constant_override("separation", 0)
 	seg.add_child(rrow)
 	var grp := ButtonGroup.new()
-	for r in [["host", "Haut-parleur"], ["client", "Client"]]:
+	for r in [["host", "Ordinateur"], ["client", "Haut-parleur"]]:
 		var rb := _button(r[1], rrow)
 		rb.theme_type_variation = "Seg"
 		rb.toggle_mode = true
@@ -535,7 +543,7 @@ func _build_ui() -> void:
 	vsink_lbl = _hint("", hs)
 	host_status = _hint("", hs)
 	var hc := _vbox(host_rest, 8)
-	_hint("Appareils connectés", hc)
+	_hint("Haut-parleurs connectés", hc)
 	no_client_lbl = _hint("Aucun pour l'instant.", hc)
 	clients_list = _vbox(hc, 8)
 
@@ -558,7 +566,7 @@ func _build_ui() -> void:
 	_button("Centrer", brow).pressed.connect(func() -> void: bal_slider.value = 0)
 	var cm := _vbox(client_rest, 16)
 	var mic_chk := CheckButton.new()
-	mic_chk.text = "Servir de micro"
+	mic_chk.text = "Partager mon micro"
 	mic_chk.button_pressed = send_mic
 	mic_chk.toggled.connect(func(on: bool) -> void:
 		send_mic = on
@@ -575,7 +583,7 @@ func _build_ui() -> void:
 	mic_box.add_child(Spectrum.new("Capture", 48.0))
 	_hint("Casque conseillé pour éviter l'écho.", mic_box)
 	ip_box = _vbox(client_rest, 8)
-	_hint("Adresse du haut-parleur", ip_box)
+	_hint("Adresse de l'ordinateur", ip_box)
 	ip_edit = LineEdit.new()
 	ip_edit.placeholder_text = "192.168.1.x"
 	ip_edit.text = cfg.get_value("client", "ip", "")
@@ -863,9 +871,9 @@ func _slider_row(parent: Node, title: String, mn: float, mx: float, val: float, 
 func _set_run_btn(b: Button, on: bool) -> void:
 	b.theme_type_variation = "Danger" if on else "Primary"
 	if b == host_btn:
-		b.text = "Arrêter" if on else "Activer le haut-parleur"
+		b.text = "Arrêter" if on else "Démarrer"
 	else:
-		b.text = "Quitter" if on else "Rejoindre"
+		b.text = "Se déconnecter" if on else "Rejoindre"
 
 
 func _set_mode(m: String) -> void:
@@ -873,7 +881,8 @@ func _set_mode(m: String) -> void:
 		_stop()
 	mode = m
 	host_btn.visible = m == "host"
-	client_btn.visible = m == "client"
+	client_btn.visible = m == "client" and running
+	meter.kind = 0 if m == "client" else 1
 	host_rest.visible = m == "host"
 	client_rest.visible = m == "client"
 	role_btns[m].button_pressed = true
@@ -1006,7 +1015,7 @@ func _stop() -> void:
 func _add_client(key: String, ip: String, port: int, cname: String, now: float) -> Dictionary:
 	bus_id += 1
 	var bus := "Mic%d" % bus_id
-	_make_bus(bus, [AudioEffectSpectrumAnalyzer.new()])
+	AudioServer.set_bus_mute(_make_bus(bus, [AudioEffectSpectrumAnalyzer.new()]), true)  # jamais sur les enceintes
 	var c := {"ip": ip, "port": port, "t": now, "bus": bus, "rx": null, "muted": false}
 
 	var panel := PanelContainer.new()
@@ -1101,7 +1110,7 @@ func _host_process(now: float) -> Vector2:
 	# Micros reçus -> sortie (micro virtuel)
 	for c in clients.values():
 		var idx := AudioServer.get_bus_index(c["bus"])
-		AudioServer.set_bus_mute(idx, c["muted"] or not vsink_ok)
+		AudioServer.set_bus_mute(idx, c["muted"] or not vsink_ok or AudioServer.output_device != VSINK)
 		var talking := false
 		var r: RxStream = c["rx"]
 		if r:
@@ -1175,9 +1184,10 @@ func _update_status(now: float) -> void:
 	pill_dot.add_theme_color_override("font_color", C_OK if live else (Color("#fbbf24") if running else C_MUTED))
 	meter.state = 2 if live else (1 if running else 0)
 	if mode == "host":
-		pill_txt.text = "En diffusion" if live else "Prêt"
+		pill_txt.text = "Envoi du son" if live else "Prêt"
 	else:
-		pill_txt.text = ("Connecté à " + _peer_name(ip_edit.text.strip_edges())) if live else ("Connexion…" if running else "Non connecté")
+		pill_txt.text = ("Connecté à " + _peer_name(ip_edit.text.strip_edges())) if live else ("Connexion…" if running else "En attente d'un ordinateur")
+	client_btn.visible = mode == "client" and running
 	hero_name.text = _my_name()
 	no_client_lbl.visible = clients.is_empty()
 	if mode == "host":
@@ -1185,9 +1195,9 @@ func _update_status(now: float) -> void:
 		if not running:
 			vsink_lbl.text = ""
 	elif not running:
-		client_status.text = "Touchez un haut-parleur ci-dessous pour l'écouter."
+		client_status.text = ""
 	elif now - rx.last_rx > 2.0:
-		client_status.text = "En attente du haut-parleur… (vérifier l'IP et le pare-feu UDP %d)" % PORT
+		client_status.text = "En attente de l'ordinateur… (pare-feu UDP %d)" % PORT
 	else:
 		client_status.text = "%d Hz, tampon ~%d ms, perdus : %d" % [rx.rate, rx.latency_ms(), rx.lost]
 
@@ -1318,11 +1328,16 @@ func _discovery(now: float, delta: float) -> void:
 	while disc.get_available_packet_count() > 0:
 		var parts := disc.get_packet().get_string_from_utf8().split("|", true, 4)
 		var ip := disc.get_packet_ip()
+		if parts[0] == INVITE and parts.size() >= 2 and parts[1] != my_id:
+			if mode == "client" and not (running and ip_edit.text.strip_edges() == ip):
+				if running:
+					_stop()
+				ip_edit.text = ip
+				_start_client()
+			continue
 		if parts.size() < 5 or parts[0] != BEACON2 or parts[1] == my_id:
 			continue
 		peers[parts[1]] = {"ip": ip, "role": parts[2], "state": parts[3], "name": parts[4], "t": now}
-		if not running and mode == "client" and parts[2] == "host" and ip_edit.text.strip_edges() == "":
-			ip_edit.text = ip
 	for k in peers.keys():
 		if now - peers[k]["t"] > 4.0:
 			peers.erase(k)
@@ -1334,6 +1349,16 @@ func _discovery(now: float, delta: float) -> void:
 		_rebuild_peers()
 
 
+## La source invite un haut-parleur : il répond en se connectant (HELLO).
+func _invite(ip: String) -> void:
+	if not running:
+		_start_host()
+	if not running:
+		return
+	disc.set_dest_address(ip, DISC_PORT)
+	disc.put_packet(("%s|%s" % [INVITE, my_id]).to_utf8_buffer())
+
+
 func _rebuild_peers() -> void:
 	for ch in found_list.get_children():
 		ch.queue_free()
@@ -1342,24 +1367,20 @@ func _rebuild_peers() -> void:
 	for k in peers:
 		var p: Dictionary = peers[k]
 		var is_host: bool = p["role"] == "host"
-		var can := mode == "client" and is_host
-		var link := false  # relié à moi
+		var can := mode == "host" and not is_host  # la source touche un haut-parleur
+		var link := false
 		if can:
-			link = running and p["ip"] == cur
-		elif mode == "host" and not is_host:
 			for c in clients.values():
 				link = link or c["ip"] == p["ip"]
+		elif mode == "client" and is_host:
+			link = running and p["ip"] == cur
 		joinable = joinable or (can and not link)
 		var b := Button.new()
 		b.theme_type_variation = "Row"
 		b.custom_minimum_size.y = 48
 		if can:
 			var ip: String = p["ip"]
-			b.pressed.connect(func() -> void:
-				if running:
-					_stop()
-				ip_edit.text = ip
-				_start_client())
+			b.pressed.connect(func() -> void: _invite(ip))
 		else:
 			b.mouse_filter = MOUSE_FILTER_IGNORE
 			b.focus_mode = Control.FOCUS_NONE
@@ -1382,7 +1403,7 @@ func _rebuild_peers() -> void:
 		nm.size_flags_horizontal = SIZE_EXPAND_FILL
 		nm.size_flags_vertical = SIZE_SHRINK_CENTER
 		nm.clip_text = true
-		var role := "Haut-parleur" if is_host else "Client"
+		var role := "Ordinateur" if is_host else "Haut-parleur"
 		var rl := _hint(role + (", connecté" if link else ""), h)
 		rl.size_flags_vertical = SIZE_SHRINK_CENTER
 		rl.autowrap_mode = TextServer.AUTOWRAP_OFF
@@ -1390,7 +1411,7 @@ func _rebuild_peers() -> void:
 			lb.mouse_filter = MOUSE_FILTER_IGNORE
 	found_lbl.visible = peers.is_empty()
 	found_lbl.text = "Aucun autre appareil pour l'instant"
-	list_title.text = "Touchez un haut-parleur pour l'écouter" if joinable else "Appareils à proximité"
+	list_title.text = "Touchez un haut-parleur pour lui envoyer le son" if joinable else "Appareils à proximité"
 
 
 func _broadcast_addrs() -> PackedStringArray:
