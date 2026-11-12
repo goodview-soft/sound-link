@@ -538,20 +538,6 @@ func _build_ui() -> void:
 	_hint("Appareils connectés", hc)
 	no_client_lbl = _hint("Aucun pour l'instant.", hc)
 	clients_list = _vbox(hc, 8)
-	if not OS.has_feature("mobile"):
-		var qh := HBoxContainer.new()
-		qh.add_theme_constant_override("separation", 16)
-		host_rest.add_child(qh)
-		var qr := TextureRect.new()
-		qr.texture = load("res://qr_apk.svg")
-		qr.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-		qr.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-		qr.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
-		qr.custom_minimum_size = Vector2(88, 88)
-		qh.add_child(qr)
-		var qv := _hint("Appli Android", qh)
-		qv.size_flags_vertical = SIZE_SHRINK_CENTER
-		qv.autowrap_mode = TextServer.AUTOWRAP_OFF
 
 	# Réglages du rôle Client
 	client_rest = _vbox(gs, 24)
@@ -597,6 +583,20 @@ func _build_ui() -> void:
 	ip_edit.text_submitted.connect(func(_t: String) -> void:
 		if not running: _start_client())
 	client_status = _hint("", client_rest)
+
+	# QR de l'appli Android (PC, quel que soit le rôle)
+	if not OS.has_feature("mobile"):
+		var qb := _vbox(gs, 8)
+		_hint("Appli Android", qb)
+		var qr := TextureRect.new()
+		qr.texture = load("res://qr_apk.svg")
+		qr.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		qr.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		qr.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+		qr.custom_minimum_size = Vector2(150, 150)
+		qr.size_flags_horizontal = SIZE_SHRINK_BEGIN
+		qb.add_child(qr)
+		_hint("Scanne ce code avec le téléphone pour télécharger l'APK.", qb)
 
 	# Version et mise à jour
 	upd_card = PanelContainer.new()
