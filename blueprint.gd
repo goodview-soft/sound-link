@@ -32,6 +32,11 @@ var rects := {}
 var ports: Array = []  # {id, kind, pos}
 var btns: Array = []  # {rect, act, id, kind}
 var drag := {}
+var cables: Array = []  # {id, kind, pts}
+var hover := {}
+var spec := PackedFloat32Array()
+var spec_show := PackedFloat32Array()
+var spec_peak := PackedFloat32Array()
 var mpos := Vector2.ZERO
 
 
@@ -89,6 +94,14 @@ func _gui_input(ev: InputEvent) -> void:
 			if (rects[id] as Rect2).has_point(ev.position):
 				over = true
 		mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND if over else Control.CURSOR_ARROW
+		hover = {}
+		if drag.is_empty() and not over:
+			for cb in cables:
+				var pts: PackedVector2Array = cb["pts"]
+				for i in pts.size() - 1:
+					var cp := Geometry2D.get_closest_point_to_segment(ev.position, pts[i], pts[i + 1])
+					if cp.distance_to(ev.position) < 9.0:
+						hover = {"id": cb["id"], "kind": cb["kind"]}
 
 
 func _txt(s: String, p: Vector2, size: int, col: Color, w := -1.0, align := HORIZONTAL_ALIGNMENT_LEFT) -> void:
@@ -212,6 +225,7 @@ func _draw() -> void:
 	rects.clear()
 	ports.clear()
 	btns.clear()
+	cables.clear()
 	var W := size.x
 	draw_rect(Rect2(Vector2.ZERO, size), BG)
 	var x := 0.0
@@ -283,6 +297,9 @@ func _draw() -> void:
 		if nd["listen"]:
 			var pts := PackedVector2Array([me_in, Vector2(me_in.x, gy), Vector2(p_in.x, gy), p_in])
 			_edge(pts, RED if nd["mute"] else OK, nd["talk"], true)
+			cables.append({"id": nd["id"], "kind": "in", "pts": pts})
+			if hover.get("id", "") == nd["id"] and hover.get("kind", "") == "in":
+				draw_polyline(pts, Color(1, 1, 1, 0.35), 5.0, true)
 			var lbl: String = "son" if nd["snd"] else ("micro" if nd["mic"] else "")
 			if lbl != "":
 				_txt(lbl, Vector2((me_in.x + p_in.x) / 2 - 10, gy - 5), 10, OK)
@@ -290,6 +307,9 @@ func _draw() -> void:
 		if nd["sub"] or nd["invited"]:
 			var pts2 := PackedVector2Array([me_out, Vector2(me_out.x, ay), Vector2(p_out.x, ay), p_out])
 			_edge(pts2, AMBER if nd["sub"] else DIM.lightened(0.2), nd["sub_on"], false)
+			cables.append({"id": nd["id"], "kind": "out", "pts": pts2})
+			if hover.get("id", "") == nd["id"] and hover.get("kind", "") == "out":
+				draw_polyline(pts2, Color(1, 1, 1, 0.35), 5.0, true)
 			var mid := (me_out.x + p_out.x) / 2
 			var pw := 42.0
 			var tot := pw * 2 + 4.0 if me["can_snd"] else pw
@@ -344,3 +364,43 @@ func _draw() -> void:
 		var dc := OK if drag["kind"] == "in" else AMBER
 		draw_dashed_line(from, mpos, dc, 2.0, 6.0)
 		draw_circle(mpos, 4.0, dc)
+	if not hover.is_empty() and drag.is_empty():
+		_spectrum_tip(nodes)
+
+
+func _spectrum_tip(list: Array) -> void:
+	var nm := ""
+	for nd in list:
+		if nd["id"] == hover["id"]:
+			nm = nd["name"]
+	var title := ("%s → moi" % nm) if hover["kind"] == "in" else ("moi → %s" % nm)
+	var col := OK if hover["kind"] == "in" else AMBER
+	var nb := 28
+	if spec_show.size() != nb:
+		spec_show.resize(nb)
+		spec_peak.resize(nb)
+	for i in nb:
+		var v := spec[i] if spec.size() == nb else 0.0
+		spec_show[i] = lerpf(spec_show[i], v, 0.5)
+		spec_peak[i] = maxf(spec_show[i], spec_peak[i] - 0.015)
+	var w := 232.0
+	var h := 112.0
+	var pos := Vector2(clampf(mpos.x + 16, 4, size.x - w - 4), clampf(mpos.y + 16, 4, size.y - h - 4))
+	var r := Rect2(pos, Vector2(w, h))
+	draw_rect(r, Color(0.04, 0.09, 0.19, 0.96))
+	draw_rect(r, col, false, 1.5)
+	_txt(title, pos + Vector2(10, 18), 12, TEXT, w - 20)
+	var bx := pos.x + 10
+	var bw := (w - 20) / nb
+	var base := pos.y + h - 20
+	var hh := h - 54
+	for i in nb:
+		var bh := spec_show[i] * hh
+		draw_rect(Rect2(bx + i * bw, base - bh, maxf(bw - 1.5, 1.0), bh), col.lerp(Color.WHITE, spec_show[i] * 0.3))
+		draw_rect(Rect2(bx + i * bw, base - spec_peak[i] * hh - 2, maxf(bw - 1.5, 1.0), 1.5), TEXT)
+	draw_line(Vector2(bx, base + 1), Vector2(pos.x + w - 10, base + 1), DIM, 1.0)
+	_txt("60 Hz", Vector2(bx, pos.y + h - 6), 9, MUTED)
+	_txt("1 kHz", Vector2(bx + (w - 20) * 0.5 - 12, pos.y + h - 6), 9, MUTED)
+	_txt("10 kHz", Vector2(pos.x + w - 40, pos.y + h - 6), 9, MUTED)
+	if spec.is_empty():
+		_txt("aucun signal", Vector2(pos.x, pos.y + h / 2 + 6), 12, MUTED, w, HORIZONTAL_ALIGNMENT_CENTER)

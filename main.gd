@@ -89,6 +89,8 @@ var bp: Control
 var peer_panel: VBoxContainer
 var selected_peer := ""
 var my_type := "c"
+var out_pkts: Array = []
+var spec_t := 0.0
 var type_picks: Array = []
 var invited := {}  # id -> true : appareils que j'ai invités à m'écouter
 
@@ -106,6 +108,7 @@ class RxStream:
 	var last_seq := -1
 	var lost := 0
 	var last_rx := -100.0
+	var last_pkts: Array = []  # 2 derniers paquets (pour le spectre au survol)
 	var prebuffer := 4
 	var max_queue := 8
 	var stereo: bool
@@ -129,6 +132,9 @@ class RxStream:
 			lost += s - last_seq - 1
 		last_seq = s
 		last_rx = now
+		last_pkts.append(pkt)
+		if last_pkts.size() > 2:
+			last_pkts.pop_front()
 		var r := pkt.decode_u32(hdr + 4)
 		if r != rate:
 			_setup(r)
@@ -1100,6 +1106,9 @@ func _share_process(now: float) -> Vector2:
 				pl = maxf(pl, absf(m))
 				pkt.encode_s16(o, int(m * 32767.0))
 				o += 2
+		out_pkts.append(pkt)
+		if out_pkts.size() > 2:
+			out_pkts.pop_front()
 		for s in subs.values():
 			udp.set_dest_address(s["ip"], s["port"])
 			udp.put_packet(pkt)
@@ -1282,6 +1291,8 @@ func _process(delta: float) -> void:
 	_discovery(now, delta)
 	_update_status(now)
 	_overlay_process(now, delta)
+	_spec_process(now, delta)
+	_ov_spec(now, delta)
 
 
 func _overlay_process(now: float, delta: float) -> void:
@@ -1293,6 +1304,41 @@ func _overlay_process(now: float, delta: float) -> void:
 	if overlay != null:
 		overlay.set_items(list if overlay_on else [])
 	_bp_update(now)
+
+
+var ovs_t := 0.0
+
+
+## Spectre (14 bandes) de chaque pastille de l'overlay : flux reçu, sinon ce que j'envoie.
+func _ov_spec(now: float, delta: float) -> void:
+	if overlay == null or not overlay.visible:
+		return
+	ovs_t -= delta
+	if ovs_t > 0.0:
+		return
+	ovs_t = 0.06
+	var res: Array = []
+	for it in overlay.items:
+		var pk: Array = []
+		var st := true
+		if it["mouth"] and it["talk"]:
+			for k in rxs:
+				if k.begins_with(str(it["ip"]) + ":"):
+					for t in ["snd", "mic"]:
+						if rxs[k][t] and now - rxs[k][t].last_rx < 1.0:
+							pk = rxs[k][t].last_pkts
+							st = t == "snd"
+		elif it["ear"] and it["ear_on"]:
+			pk = out_pkts
+			st = cap_kind == "snd"
+		var sp := _spectrum_of(pk, st) if not pk.is_empty() else PackedFloat32Array()
+		var s14 := PackedFloat32Array()
+		if sp.size() == 28:
+			for i in 14:
+				s14.append((sp[i * 2] + sp[i * 2 + 1]) * 0.5)
+		res.append(s14)
+	overlay.specs = res
+	overlay.canvas.queue_redraw()
 
 
 ## Appareils connectés (que j'écoute et/ou qui m'écoutent), un par IP (overlay).
@@ -1308,7 +1354,7 @@ func _conn_rows(now: float) -> Array:
 			for t in ["snd", "mic"]:
 				if e.has(t) and e[t] and now - e[t].last_rx < 1.0:
 					talk = true
-			rows[p["ip"]] = {"name": p["name"], "mouth": true, "talk": talk, "mute": _pcfg(id)["mute"], "ear": false, "ear_on": false}
+			rows[p["ip"]] = {"ip": p["ip"], "name": p["name"], "mouth": true, "talk": talk, "mute": _pcfg(id)["mute"], "ear": false, "ear_on": false}
 		for sb in subs.values():
 			if now - sb["t"] > TIMEOUT:
 				continue
@@ -1317,7 +1363,7 @@ func _conn_rows(now: float) -> Array:
 				for p in peers.values():
 					if p["ip"] == sb["ip"]:
 						nm = p["name"]
-				rows[sb["ip"]] = {"name": nm, "mouth": false, "talk": false, "mute": false, "ear": false, "ear_on": false}
+				rows[sb["ip"]] = {"ip": sb["ip"], "name": nm, "mouth": false, "talk": false, "mute": false, "ear": false, "ear_on": false}
 			rows[sb["ip"]]["ear"] = true
 			rows[sb["ip"]]["ear_on"] = cap_kind != ""  # barré si je ne partage rien
 	return rows.values()
@@ -1566,6 +1612,57 @@ func _rebuild_peers() -> void:
 		_peer_controls(selected_peer)
 	else:
 		selected_peer = ""
+
+
+## Spectre (28 bandes log 60 Hz–10 kHz, Goertzel) des derniers paquets, 0..1.
+func _spectrum_of(pkts: Array, stereo: bool) -> PackedFloat32Array:
+	var out := PackedFloat32Array()
+	out.resize(28)
+	if pkts.is_empty():
+		return out
+	var xs := PackedFloat32Array()
+	var step := 4 if stereo else 2
+	for pk: PackedByteArray in pkts:
+		var n := (pk.size() - 12) / step
+		for i in n:
+			xs.append(pk.decode_s16(12 + i * step) / 32768.0)
+	var rate := float(pkts[pkts.size() - 1].decode_u32(8))
+	if rate <= 0.0 or xs.size() < 64:
+		return out
+	var cnt := xs.size()
+	for b in 28:
+		var f := 60.0 * pow(10000.0 / 60.0, (b + 0.5) / 28.0)
+		var coeff := 2.0 * cos(TAU * f / rate)
+		var s1 := 0.0
+		var s2 := 0.0
+		for x in xs:
+			var s0: float = x + coeff * s1 - s2
+			s2 = s1
+			s1 = s0
+		var mag := sqrt(maxf(s1 * s1 + s2 * s2 - coeff * s1 * s2, 0.0)) * 2.0 / cnt
+		out[b] = clampf((20.0 * log(mag + 1e-6) / log(10.0) + 60.0) / 60.0, 0.0, 1.0)
+	return out
+
+
+func _spec_process(now: float, delta: float) -> void:
+	spec_t -= delta
+	if spec_t > 0.0:
+		return
+	spec_t = 0.035
+	var h: Dictionary = bp.hover
+	if h.is_empty():
+		bp.spec = PackedFloat32Array()
+		return
+	if h["kind"] == "in":
+		var p: Dictionary = peers.get(h["id"], {})
+		var e: Dictionary = rxs.get("%s:%d" % [p.get("ip", ""), p.get("port", 0)], {})
+		for t in ["snd", "mic"]:
+			if e.has(t) and e[t] and now - e[t].last_rx < 1.0:
+				bp.spec = _spectrum_of(e[t].last_pkts, t == "snd")
+				return
+		bp.spec = PackedFloat32Array()
+	else:
+		bp.spec = _spectrum_of(out_pkts, cap_kind == "snd") if cap_kind != "" else PackedFloat32Array()
 
 
 func _refresh_type_picks() -> void:

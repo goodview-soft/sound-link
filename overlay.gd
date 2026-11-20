@@ -11,7 +11,9 @@ const C_MUTED := Color("#7d8497")
 const H := 44.0
 const PAD := 10.0
 const ICON := 22.0
+const SPW := 56.0
 
+var specs: Array = []
 var items: Array = []  # [{name, talk, mute}]
 var font: Font
 var canvas: Control
@@ -40,7 +42,7 @@ func _ready() -> void:
 
 
 func _chip_w(it: Dictionary) -> float:
-	return H + font.get_string_size(it["name"], HORIZONTAL_ALIGNMENT_LEFT, 160, 15).x + 14.0 + 2 * ICON + 22.0
+	return H + font.get_string_size(it["name"], HORIZONTAL_ALIGNMENT_LEFT, 160, 15).x + 14.0 + 2 * ICON + 22.0 + SPW + 8.0
 
 
 func set_items(list: Array) -> void:
@@ -65,7 +67,9 @@ func _icon(c: Vector2, ear: bool, col: Color, off: bool) -> void:
 
 func _draw_items() -> void:
 	var y := PAD
+	var idx := -1
 	for it in items:
+		idx += 1
 		var w := _chip_w(it)
 		var r := Rect2(PAD, y, w, H)
 		var sb := StyleBoxFlat.new()
@@ -80,6 +84,12 @@ func _draw_items() -> void:
 		var fs := font.get_string_size(ini, HORIZONTAL_ALIGNMENT_LEFT, -1, 17)
 		canvas.draw_string(font, c + Vector2(-fs.x / 2, 6), ini, HORIZONTAL_ALIGNMENT_LEFT, -1, 17, C_TEXT)
 		canvas.draw_string(font, Vector2(PAD + H, y + H / 2 + 5), it["name"], HORIZONTAL_ALIGNMENT_LEFT, 160, 15, C_MUTED if it["mute"] else C_TEXT)
+		var sx := PAD + w - 14.0 - 2 * ICON - 8.0 - 8.0 - SPW
+		var sp: PackedFloat32Array = specs[idx] if idx < specs.size() else PackedFloat32Array()
+		for b in 14:
+			var v: float = sp[b] if sp.size() == 14 else 0.0
+			var bh := 2.0 + v * 22.0
+			canvas.draw_rect(Rect2(sx + b * 4.0, y + H / 2 + 11 - bh, 3.0, bh), col.lerp(Color.WHITE, v * 0.3) if v > 0.02 else Color(0.3, 0.34, 0.42))
 		var ix := PAD + w - 14.0 - ICON * 0.5
 		var cy := y + H / 2
 		if it["mouth"]:
