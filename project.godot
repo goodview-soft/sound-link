@@ -21,6 +21,8 @@ driver/enable_input=true
 
 [display]
 
+window/per_pixel_transparency/allowed=true
+
 window/size/viewport_width=460
 window/size/viewport_height=820
 window/stretch/mode="canvas_items"

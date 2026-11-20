@@ -82,6 +82,10 @@ var upd_lbl: Label
 var upd_btn: Button
 var upd_http: HTTPRequest
 var upd_info := {}
+var overlay: Window
+var sw_overlay: Switch
+var overlay_on := true
+var ov_t := 0.0
 
 
 # ---------------------------------------------------------------- Réception d'un flux
@@ -425,9 +429,16 @@ func _ready() -> void:
 	if my_id == "":
 		my_id = str(randi())
 	peer_cfg = cfg.get_value("peers", "cfg", {})
+	overlay_on = cfg.get_value("app", "overlay", true)
 	_build_ui()
 	if not OS.has_feature("mobile"):
 		get_window().min_size = Vector2i(400, 680)
+		overlay = preload("res://overlay.gd").new()
+		add_child(overlay)
+		sw_overlay.set_on(overlay_on)
+		sw_overlay.toggled.connect(func(on: bool) -> void:
+			overlay_on = on
+			ov_t = 0.0)
 	_refresh_devices()
 	if udp.bind(data_port) != OK:
 		pill_txt.text = "Port %d indisponible" % data_port
@@ -452,6 +463,7 @@ func _save() -> void:
 	cfg.set_value("listen", "volume", volume)
 	cfg.set_value("listen", "balance", balance)
 	cfg.set_value("app", "id", my_id)
+	cfg.set_value("app", "overlay", overlay_on)
 	cfg.set_value("peers", "cfg", peer_cfg)
 	cfg.set_value("app", "ip", ip_edit.text)
 	cfg.set_value("app", "name", name_edit.text)
@@ -633,6 +645,8 @@ func _build_ui() -> void:
 	brow.add_child(mute)
 	_button("Centrer", brow).pressed.connect(func() -> void: bal_slider.value = 0)
 	vsink_lbl = _hint("", gl)
+	if not OS.has_feature("mobile"):
+		sw_overlay = _switch_row(gl, "Overlay des appareils (bas de l'écran)")
 
 	var gi := _vbox(gs, 8)
 	_hint("Adresse d'un appareil non détecté", gi)
@@ -1228,6 +1242,32 @@ func _process(delta: float) -> void:
 	meter.set_levels(sqrt(level_l), sqrt(level_r))
 	_discovery(now, delta)
 	_update_status(now)
+	_overlay_process(now, delta)
+
+
+func _overlay_process(now: float, delta: float) -> void:
+	if overlay == null:
+		return
+	ov_t -= delta
+	if ov_t > 0.0:
+		return
+	ov_t = 0.15
+	var list: Array = []
+	if overlay_on:
+		if cap_kind != "":
+			list.append({"name": _my_name(), "talk": true, "mute": false, "me": true})
+		for id in listening:
+			if not peers.has(id):
+				continue
+			var p: Dictionary = peers[id]
+			var e: Dictionary = rxs.get("%s:%d" % [p["ip"], p["port"]], {})
+			var talk := false
+			for t in ["snd", "mic"]:
+				if e.has(t) and e[t] and now - e[t].last_rx < 1.0:
+					talk = true
+			list.append({"name": p["name"], "talk": talk, "mute": _pcfg(id)["mute"], "me": false})
+	if str(list) != str(overlay.items):
+		overlay.set_items(list)
 
 
 func _update_status(now: float) -> void:
