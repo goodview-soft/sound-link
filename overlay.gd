@@ -9,6 +9,7 @@ const C_ACCENT := Color("#ffb347")
 const C_MUTED := Color("#7d8497")
 const H := 44.0
 const PAD := 10.0
+const ICON := 22.0
 
 var items: Array = []  # [{name, talk, mute}]
 var font: Font
@@ -38,41 +39,62 @@ func _ready() -> void:
 
 
 func _chip_w(it: Dictionary) -> float:
-	return H + font.get_string_size(it["name"], HORIZONTAL_ALIGNMENT_LEFT, 160, 15).x + 18.0
+	return H + font.get_string_size(it["name"], HORIZONTAL_ALIGNMENT_LEFT, 160, 15).x + 14.0 + 2 * ICON + 22.0
 
 
-## Met à jour la liste ; retourne true si la taille de la fenêtre a changé.
 func set_items(list: Array) -> void:
 	items = list
 	if items.is_empty():
 		visible = false
 		return
-	var w := PAD
+	var w := 0.0
 	for it in items:
-		w += _chip_w(it) + 8.0
-	var sz := Vector2i(int(w + PAD), int(H + PAD * 2))
+		w = maxf(w, _chip_w(it))
+	var sz := Vector2i(int(w + PAD * 2), int((H + 6.0) * items.size() - 6.0 + PAD * 2))
 	var scr := DisplayServer.screen_get_usable_rect(DisplayServer.window_get_current_screen(0))
 	size = sz
-	position = Vector2i(scr.position.x + (scr.size.x - sz.x) / 2, scr.position.y + scr.size.y - sz.y - 12)
+	position = Vector2i(scr.position.x + 12, scr.position.y + scr.size.y - sz.y - 12)  # en bas à gauche
 	visible = true
 	canvas.queue_redraw()
 
 
+## Oreille (l'appareil m'écoute) ou bouche (il m'envoie du son). off = barré en rouge.
+func _icon(c: Vector2, ear: bool, col: Color, off: bool) -> void:
+	if ear:
+		canvas.draw_arc(c + Vector2(0, -2), 7, deg_to_rad(150), deg_to_rad(400), 18, col, 2.2, true)
+		canvas.draw_arc(c + Vector2(1, -1), 3.2, deg_to_rad(180), deg_to_rad(380), 10, col, 2.0, true)
+		canvas.draw_line(c + Vector2(-5, 3), c + Vector2(-1, 8), col, 2.2, true)
+		canvas.draw_line(c + Vector2(-1, 8), c + Vector2(3, 8), col, 2.2, true)
+	else:
+		canvas.draw_arc(c, 9, deg_to_rad(15), deg_to_rad(165), 14, col, 2.4, true)
+		canvas.draw_line(c + Vector2(-8, 0), c + Vector2(8, 0), col, 2.0, true)
+		canvas.draw_arc(c + Vector2(0, -1), 6, deg_to_rad(200), deg_to_rad(340), 10, col, 2.0, true)
+	if off:
+		canvas.draw_line(c + Vector2(-9, 9), c + Vector2(9, -9), Color("#f87171"), 2.6, true)
+
+
 func _draw_items() -> void:
-	var x := PAD
+	var y := PAD
 	for it in items:
 		var w := _chip_w(it)
-		var r := Rect2(x, PAD, w, H)
+		var r := Rect2(PAD, y, w, H)
 		var sb := StyleBoxFlat.new()
 		sb.bg_color = C_BG
 		sb.set_corner_radius_all(int(H / 2))
 		canvas.draw_style_box(sb, r)
-		var c := Vector2(x + H / 2, PAD + H / 2)
+		var c := Vector2(PAD + H / 2, y + H / 2)
 		var col: Color = C_OK if it["talk"] else C_MUTED
 		canvas.draw_circle(c, H / 2 - 6, Color(0.16, 0.18, 0.24))
 		canvas.draw_arc(c, H / 2 - 5, 0, TAU, 40, col, 3.0 if it["talk"] else 1.5, true)
 		var ini: String = it["name"].substr(0, 1).to_upper()
 		var fs := font.get_string_size(ini, HORIZONTAL_ALIGNMENT_LEFT, -1, 17)
-		canvas.draw_string(font, c + Vector2(-fs.x / 2, 6), ini, HORIZONTAL_ALIGNMENT_LEFT, -1, 17, C_ACCENT if it["me"] else C_TEXT)
-		canvas.draw_string(font, Vector2(x + H, PAD + H / 2 + 5), it["name"], HORIZONTAL_ALIGNMENT_LEFT, 160, 15, C_MUTED if it["mute"] else C_TEXT)
-		x += w + 8.0
+		canvas.draw_string(font, c + Vector2(-fs.x / 2, 6), ini, HORIZONTAL_ALIGNMENT_LEFT, -1, 17, C_TEXT)
+		canvas.draw_string(font, Vector2(PAD + H, y + H / 2 + 5), it["name"], HORIZONTAL_ALIGNMENT_LEFT, 160, 15, C_MUTED if it["mute"] else C_TEXT)
+		var ix := PAD + w - 14.0 - ICON * 0.5
+		var cy := y + H / 2
+		if it["mouth"]:
+			_icon(Vector2(ix, cy), false, C_OK if it["talk"] else C_MUTED, it["mute"])
+		ix -= ICON + 8.0
+		if it["ear"]:
+			_icon(Vector2(ix, cy), true, C_OK if it["ear_on"] else C_MUTED, not it["ear_on"])
+		y += H + 6.0

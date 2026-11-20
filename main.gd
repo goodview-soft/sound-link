@@ -1252,10 +1252,8 @@ func _overlay_process(now: float, delta: float) -> void:
 	if ov_t > 0.0:
 		return
 	ov_t = 0.15
-	var list: Array = []
+	var rows := {}  # ip -> {name, mouth, talk, mute, ear, ear_on}
 	if overlay_on:
-		if cap_kind != "":
-			list.append({"name": _my_name(), "talk": true, "mute": false, "me": true})
 		for id in listening:
 			if not peers.has(id):
 				continue
@@ -1265,20 +1263,19 @@ func _overlay_process(now: float, delta: float) -> void:
 			for t in ["snd", "mic"]:
 				if e.has(t) and e[t] and now - e[t].last_rx < 1.0:
 					talk = true
-			list.append({"name": p["name"], "talk": talk, "mute": _pcfg(id)["mute"], "me": false})
-		var seen := {}  # appareils qui m'écoutent (ex. le téléphone), sans doublon
-		for id in listening:
-			if peers.has(id):
-				seen[peers[id]["ip"]] = true
+			rows[p["ip"]] = {"name": p["name"], "mouth": true, "talk": talk, "mute": _pcfg(id)["mute"], "ear": false, "ear_on": false}
 		for sb in subs.values():
-			if seen.has(sb["ip"]) or now - sb["t"] > TIMEOUT:
+			if now - sb["t"] > TIMEOUT:
 				continue
-			seen[sb["ip"]] = true
-			var nm: String = sb["ip"]
-			for p in peers.values():
-				if p["ip"] == sb["ip"]:
-					nm = p["name"]
-			list.append({"name": nm, "talk": cap_kind != "", "mute": false, "me": false})
+			if not rows.has(sb["ip"]):
+				var nm: String = sb["ip"]
+				for p in peers.values():
+					if p["ip"] == sb["ip"]:
+						nm = p["name"]
+				rows[sb["ip"]] = {"name": nm, "mouth": false, "talk": false, "mute": false, "ear": false, "ear_on": false}
+			rows[sb["ip"]]["ear"] = true
+			rows[sb["ip"]]["ear_on"] = cap_kind != ""  # barré si je ne partage rien
+	var list: Array = rows.values()
 	if str(list) != str(overlay.items):
 		overlay.set_items(list)
 
