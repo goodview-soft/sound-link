@@ -90,8 +90,8 @@ var bp: Control
 var my_type := "c"
 var out_pkts: Array = []
 var trust := {}  # id -> {key, name} : appareils appairés
-var pair_code := ""
-var pair_fail := 0
+var prompts: Array = []
+var cur_prompt := {}
 var pair_try := {}
 var ctl_seen := {}
 var ctl_nonce := 0
@@ -114,7 +114,6 @@ var toast_lbl: Label
 var toast_t := 0.0
 var idle_t := 0.0
 var trust_box: VBoxContainer
-var code_lbl: Label
 var confirm: ConfirmationDialog
 var spec_t := 0.0
 var type_picks: Array = []
@@ -469,9 +468,6 @@ func _ready() -> void:
 	overlay_on = cfg.get_value("app", "overlay", true)
 	trust = cfg.get_value("trust", "map", {})
 	favs = cfg.get_value("app", "favs", [])
-	pair_code = cfg.get_value("app", "code", "")
-	if pair_code == "":
-		_new_code()
 	_build_ui()
 	if not OS.has_feature("mobile"):
 		get_window().min_size = Vector2i(400, 680)
@@ -509,7 +505,6 @@ func _save() -> void:
 	cfg.set_value("app", "type", my_type)
 	cfg.set_value("trust", "map", trust)
 	cfg.set_value("app", "favs", favs)
-	cfg.set_value("app", "code", pair_code)
 	cfg.set_value("peers", "cfg", peer_cfg)
 	cfg.set_value("app", "ip", ip_edit.text)
 	cfg.set_value("app", "name", name_edit.text)
@@ -752,12 +747,6 @@ func _build_ui() -> void:
 	_refresh_type_picks()
 
 	var gp := _vbox(gs, 8)
-	_hint("Code d'appairage de cet appareil", gp)
-	code_lbl = _label("", gp)
-	code_lbl.add_theme_font_size_override("font_size", 30)
-	code_lbl.add_theme_color_override("font_color", C_ACCENT)
-	_refresh_code()
-	_hint("À saisir sur l'autre appareil pour les appairer (une seule fois). Il change après chaque appairage.", gp)
 	_hint("Appareils appairés", gp)
 	trust_box = _vbox(gp, 8)
 
@@ -1335,6 +1324,8 @@ func _recv_process(now: float) -> void:
 			_on_pairreq(msg.split("|"), ip, port)
 		elif msg.begins_with("PAIROK|"):
 			_on_pairok(msg.split("|"))
+		elif msg.begins_with("PAIRNO|"):
+			_on_pairno(msg.split("|"))
 		elif msg == "BYE":
 			subs.erase(key)
 
@@ -1740,10 +1731,6 @@ func _refresh_type_picks() -> void:
 
 # ---------------------------------------------------------------- Appairage et contrôle (v4)
 
-func _new_code() -> void:
-	pair_code = "%06d" % (randi() % 1000000)
-
-
 func _hmac(key: String, msg: String) -> String:
 	return Crypto.new().hmac_digest(HashingContext.HASH_SHA256, key.to_utf8_buffer(), msg.to_utf8_buffer()).hex_encode()
 
@@ -1777,91 +1764,122 @@ func _on_ctl(q: PackedStringArray, ip: String, port: int, now: float) -> void:
 	if not peers.has(id):
 		peers[id] = {"ip": ip, "port": port, "snd": false, "mic": false, "name": trust[id]["name"], "t": now, "type": "c"}
 	var nm: String = peers[id]["name"]
+	var what := _kind_txt(q[4])
 	match q[3]:
 		"OFFER":
-			if not listening.has(id):
-				listening[id] = true
-			want[id] = q[4]
-			sub_t = 0.0
-			_toast("%s vous envoie %s" % [nm, _kind_txt(q[4])])
+			if listening.has(id) and want.get(id, "") == q[4]:
+				return
+			_ask("%s veut vous envoyer son %s. Accepter ?" % [nm, what],
+				func() -> void:
+					listening[id] = true
+					want[id] = q[4]
+					sub_t = 0.0
+					flows_sig = "",
+				func() -> void: _send_ctl(id, "DENY", "out"))
 		"STOPOFFER":
 			if listening.has(id):
 				_toggle_listen(id)
 		"ASK":
-			if q[4] == "snd" and not OS.has_feature("mobile"):
-				_set_share("snd")
-			elif q[4] == "mic":
-				_ask_mic(nm)
+			if q[4] == "snd" and OS.has_feature("mobile"):
+				_send_ctl(id, "DENY", "in")
+				return
+			_ask("%s veut écouter votre %s. Accepter ?" % [nm, what],
+				func() -> void: _set_share(q[4]),
+				func() -> void: _send_ctl(id, "DENY", "in"))
+		"DENY":
+			_toast("%s a refusé" % nm)
+			_stop_flow(q[4], id)
 
 
-func _ask_mic(nm: String) -> void:
-	if cap_kind == "mic":
+## File d'attente de demandes à accepter / refuser, une boîte à la fois.
+func _ask(text: String, ok: Callable, no := Callable()) -> void:
+	prompts.append({"text": text, "ok": ok, "no": no})
+	_next_prompt()
+
+
+func _next_prompt() -> void:
+	if not cur_prompt.is_empty() or prompts.is_empty():
 		return
 	if confirm == null:
 		confirm = ConfirmationDialog.new()
-		confirm.ok_button_text = "Autoriser"
+		confirm.ok_button_text = "Accepter"
 		confirm.cancel_button_text = "Refuser"
-		confirm.confirmed.connect(func() -> void: _set_share("mic"))
+		confirm.confirmed.connect(func() -> void: _answer(true))
+		confirm.canceled.connect(func() -> void: _answer(false))
 		add_child(confirm)
-	confirm.dialog_text = "%s demande à écouter votre micro. Autoriser ?" % nm
-	confirm.popup_centered()
+	cur_prompt = prompts.pop_front()
+	confirm.dialog_text = cur_prompt["text"]
+	confirm.popup_centered(Vector2i(380, 140))
+
+
+func _answer(yes: bool) -> void:
+	var p: Dictionary = cur_prompt
+	cur_prompt = {}
+	var cb: Callable = p["ok"] if yes else p["no"]
+	if cb.is_valid():
+		cb.call()
+	_next_prompt()
 
 
 func _on_pairreq(q: PackedStringArray, ip: String, port: int) -> void:
-	# PAIRREQ|id|nom|nonce|hmac(code)
-	if q.size() != 5:
+	# PAIRREQ|id|nom|nonce : un appareil demande à s'appairer, je décide
+	if q.size() != 4:
 		return
-	if _hmac(pair_code, "%s|%s|%s" % [q[1], q[3], q[2]]) != q[4]:
-		pair_fail += 1
-		if pair_fail >= 5:  # trop d'essais : nouveau code
-			_new_code()
-			pair_fail = 0
-			_refresh_code()
+	var bid := q[1]
+	for p in prompts:
+		if p.get("pid", "") == bid:
+			return
+	if cur_prompt.get("pid", "") == bid:
 		return
-	trust[q[1]] = {"key": _hmac(pair_code, "key|%s|%s|%s" % [my_id, q[1], q[3]]), "name": q[2]}
 	var nm := _my_name().replace("|", " ")
-	_send_raw(ip, port, "PAIROK|%s|%s|%s|%s" % [my_id, nm, q[3], _hmac(pair_code, "ok|%s|%s|%s" % [my_id, q[3], nm])], 2)
-	_new_code()
-	pair_fail = 0
-	_save()
-	_refresh_code()
-	_toast("%s est maintenant appairé" % q[2])
-	_refresh_sheet()
+	prompts.append({"pid": bid, "text": "%s demande à s'appairer avec cet appareil. Accepter ?" % q[2],
+		"ok": func() -> void:
+			var key := Crypto.new().generate_random_bytes(16).hex_encode()
+			trust[bid] = {"key": key, "name": q[2]}
+			_send_raw(ip, port, "PAIROK|%s|%s|%s|%s" % [my_id, nm, q[3], key], 3)
+			_save()
+			_toast("%s est appairé" % q[2])
+			_refresh_sheet(),
+		"no": func() -> void: _send_raw(ip, port, "PAIRNO|%s|%s" % [my_id, q[3]], 3)})
+	_next_prompt()
 
 
 func _on_pairok(q: PackedStringArray) -> void:
-	# PAIROK|id|nom|nonce|hmac
+	# PAIROK|id|nom|nonce|clé
 	if q.size() != 5 or pair_try.is_empty() or q[3] != pair_try["nonce"]:
 		return
-	if _hmac(pair_try["code"], "ok|%s|%s|%s" % [q[1], q[3], q[2]]) != q[4]:
-		return
-	trust[q[1]] = {"key": _hmac(pair_try["code"], "key|%s|%s|%s" % [q[1], my_id, q[3]]), "name": q[2]}
+	trust[q[1]] = {"key": q[4], "name": q[2]}
 	pair_try = {}
 	_save()
-	_toast("Appairage réussi")
+	_toast("Appairage accepté")
 	if sheet_stage == "pair" and sheet_dev == q[1]:
 		sheet_stage = "kinds"
 	_refresh_sheet()
 
 
-func _do_pair(id: String, code: String) -> void:
+func _on_pairno(q: PackedStringArray) -> void:
+	if q.size() == 3 and not pair_try.is_empty() and q[2] == pair_try["nonce"]:
+		pair_try = {}
+		_toast("%s a refusé l'appairage" % _peer_name(q[1]))
+		sheet_stage = "devices"
+		_refresh_sheet()
+
+
+func _do_pair(id: String) -> void:
 	var p: Dictionary = peers.get(id, {})
-	if p.is_empty() or code.length() != 6:
-		_toast("Code à 6 chiffres requis")
+	if p.is_empty():
 		return
 	var nonce := str(randi())
-	pair_try = {"code": code, "nonce": nonce}
+	pair_try = {"nonce": nonce}
 	var nm := _my_name().replace("|", " ")
-	_send_raw(p["ip"], p["port"], "PAIRREQ|%s|%s|%s|%s" % [my_id, nm, nonce, _hmac(code, "%s|%s|%s" % [my_id, nonce, nm])], 2)
-	get_tree().create_timer(4.0).timeout.connect(func() -> void:
+	_send_raw(p["ip"], p["port"], "PAIRREQ|%s|%s|%s" % [my_id, nm, nonce], 3)
+	get_tree().create_timer(30.0).timeout.connect(func() -> void:
 		if not pair_try.is_empty() and pair_try["nonce"] == nonce:
 			pair_try = {}
-			_toast("Code incorrect ou appareil injoignable"))
-
-
-func _refresh_code() -> void:
-	if code_lbl:
-		code_lbl.text = "%s %s" % [pair_code.substr(0, 3), pair_code.substr(3)]
+			_toast("Pas de réponse à la demande d'appairage")
+			if sheet_stage == "pair":
+				sheet_stage = "devices"
+				_refresh_sheet())
 
 
 func _toast(t: String) -> void:
@@ -2157,25 +2175,17 @@ func _refresh_sheet() -> void:
 			for id in peers:
 				var p: Dictionary = peers[id]
 				var paired := trust.has(id)
-				_device_row(p.get("type", "c"), p["name"], "appairé" if paired else "à appairer", C_OK if paired else C_MUTED,
+				_device_row(p.get("type", "c"), p["name"], "appairé" if paired else "demander", C_OK if paired else C_MUTED,
 					func() -> void:
 						sheet_dev = id
 						sheet_stage = "kinds" if trust.has(id) else "pair"
+						if sheet_stage == "pair":
+							_do_pair(id)
 						_refresh_sheet())
 		"pair":
-			var p: Dictionary = peers.get(sheet_dev, {})
 			_sheet_back()
-			_sheet_title("Appairer %s" % p.get("name", ""))
-			_hint("Entrez le code à 6 chiffres affiché dans Réglages sur cet appareil, ou saisissez le vôtre (%s) sur l'autre appareil." % code_lbl.text, sheet_body)
-			var le := LineEdit.new()
-			le.placeholder_text = "Code à 6 chiffres"
-			le.max_length = 6
-			le.virtual_keyboard_type = LineEdit.KEYBOARD_TYPE_NUMBER
-			sheet_body.add_child(le)
-			var go := _button("Appairer", sheet_body)
-			go.theme_type_variation = "Primary"
-			go.pressed.connect(func() -> void: _do_pair(sheet_dev, le.text.strip_edges()))
-			le.text_submitted.connect(func(t: String) -> void: _do_pair(sheet_dev, t.strip_edges()))
+			_sheet_title("Demande envoyée à %s" % _peer_name(sheet_dev))
+			_hint("En attente : acceptez la demande sur l'autre appareil (bouton Accepter).", sheet_body)
 		"kinds":
 			var nm := _peer_name(sheet_dev)
 			_sheet_back()
