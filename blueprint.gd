@@ -32,6 +32,7 @@ var rects := {}
 var ports: Array = []  # {id, kind, pos}
 var btns: Array = []  # {rect, act, id, kind}
 var drag := {}
+var readonly := false
 var cables: Array = []  # {id, kind, pts}
 var hover := {}
 var spec := PackedFloat32Array()
@@ -60,6 +61,8 @@ func _port_at(p: Vector2, r := 11.0) -> Dictionary:
 
 
 func _gui_input(ev: InputEvent) -> void:
+	if readonly and ev is InputEventMouseButton:
+		return
 	if ev is InputEventMouseButton and ev.button_index == MOUSE_BUTTON_LEFT:
 		if ev.pressed:
 			for bt in btns:
@@ -195,6 +198,8 @@ func _face(c: Vector2, talk: bool, amp: float, hearing: bool, muted: bool, col: 
 
 
 func _pill(r: Rect2, label: String, on: bool, col: Color) -> void:
+	if readonly:
+		return
 	draw_rect(r, col.darkened(0.55) if on else BG)
 	draw_rect(r, col if on else DIM, false, 1.5)
 	var fs := font.get_string_size(label, HORIZONTAL_ALIGNMENT_LEFT, -1, 11)
@@ -202,6 +207,8 @@ func _pill(r: Rect2, label: String, on: bool, col: Color) -> void:
 
 
 func _port(id: String, kind: String, pos: Vector2, used: bool) -> void:
+	if readonly:
+		return
 	var col := OK if kind == "in" else AMBER
 	ports.append({"id": id, "kind": kind, "pos": pos, "used": used})
 	draw_circle(pos, 7.0, BG)
@@ -214,6 +221,8 @@ func _port(id: String, kind: String, pos: Vector2, used: bool) -> void:
 
 
 func _x_btn(c: Vector2, id: String, kind: String) -> void:
+	if readonly:
+		return
 	draw_circle(c, 8.0, BG)
 	draw_arc(c, 8.0, 0, TAU, 16, RED, 1.5, true)
 	draw_line(c + Vector2(-3, -3), c + Vector2(3, 3), RED, 1.5, true)
@@ -276,7 +285,7 @@ func _draw() -> void:
 	if nodes.is_empty():
 		_txt("Aucun autre appareil détecté", Vector2(0, mr.end.y + 60), 14, MUTED, W, HORIZONTAL_ALIGNMENT_CENTER)
 		return
-	_txt("Tirez un câble depuis un point ○ vers le même point de l'autre appareil", Vector2(0, size.y - 10), 11, DIM, W, HORIZONTAL_ALIGNMENT_CENTER)
+	_txt("Survolez un câble pour voir le spectre audio" if readonly else "Tirez un câble depuis un point ○ vers le même point de l'autre appareil", Vector2(0, size.y - 10), 11, DIM, W, HORIZONTAL_ALIGNMENT_CENTER)
 
 	# --- Appareils (2 colonnes)
 	var base_y := mr.end.y + 70.0

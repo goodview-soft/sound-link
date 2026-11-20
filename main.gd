@@ -13,6 +13,7 @@ const SND_TAG := "SND1"  # flux « son » : SND1 + seq u32 + rate u32 + PCM s16 
 const MIC_TAG := "MIC1"  # flux « micro » : MIC1 + seq u32 + rate u32 + PCM s16 mono
 const DevIcon := preload("res://dev_icon.gd")
 const Blueprint := preload("res://blueprint.gd")
+const LevelBar := preload("res://level_bar.gd")
 const VSINK := "soundlink_sink"
 const VERSION: String = preload("res://version.gd").VERSION
 const UPDATE_URL := "https://github.com/goodview-soft/sound-link/releases/latest/download/version.json"
@@ -86,13 +87,37 @@ var sw_overlay: Switch
 var overlay_on := true
 var ov_t := 0.0
 var bp: Control
-var peer_panel: VBoxContainer
-var selected_peer := ""
 var my_type := "c"
 var out_pkts: Array = []
+var trust := {}  # id -> {key, name} : appareils appairés
+var pair_code := ""
+var pair_fail := 0
+var pair_try := {}
+var ctl_seen := {}
+var ctl_nonce := 0
+var pending := {}  # "dir:id" -> {t, dir, id, kind}
+var want := {}  # id -> type de flux demandé en réception
+var favs: Array = []
+var flows_sig := ""
+var flows_t := 0.0
+var flow_list: VBoxContainer
+var flows_empty: Label
+var fav_box: HFlowContainer
+var fav_title: Label
+var flow_bars: Array = []
+var sheet: Control
+var sheet_body: VBoxContainer
+var sheet_stage := "devices"
+var sheet_dev := ""
+var map_view: Control
+var toast_lbl: Label
+var toast_t := 0.0
+var idle_t := 0.0
+var trust_box: VBoxContainer
+var code_lbl: Label
+var confirm: ConfirmationDialog
 var spec_t := 0.0
 var type_picks: Array = []
-var invited := {}  # id -> true : appareils que j'ai invités à m'écouter
 
 
 # ---------------------------------------------------------------- Réception d'un flux
@@ -442,6 +467,11 @@ func _ready() -> void:
 	peer_cfg = cfg.get_value("peers", "cfg", {})
 	my_type = cfg.get_value("app", "type", "p" if OS.has_feature("mobile") else "c")
 	overlay_on = cfg.get_value("app", "overlay", true)
+	trust = cfg.get_value("trust", "map", {})
+	favs = cfg.get_value("app", "favs", [])
+	pair_code = cfg.get_value("app", "code", "")
+	if pair_code == "":
+		_new_code()
 	_build_ui()
 	if not OS.has_feature("mobile"):
 		get_window().min_size = Vector2i(400, 680)
@@ -477,6 +507,9 @@ func _save() -> void:
 	cfg.set_value("app", "id", my_id)
 	cfg.set_value("app", "overlay", overlay_on)
 	cfg.set_value("app", "type", my_type)
+	cfg.set_value("trust", "map", trust)
+	cfg.set_value("app", "favs", favs)
+	cfg.set_value("app", "code", pair_code)
 	cfg.set_value("peers", "cfg", peer_cfg)
 	cfg.set_value("app", "ip", ip_edit.text)
 	cfg.set_value("app", "name", name_edit.text)
@@ -518,6 +551,10 @@ func _build_ui() -> void:
 	upd_dot.add_theme_color_override("font_color", C_ACCENT)
 	upd_dot.size_flags_vertical = SIZE_SHRINK_CENTER
 	upd_dot.visible = false
+	var mapb := _button("Carte", bar)
+	mapb.theme_type_variation = "Ghost"
+	mapb.add_theme_font_size_override("font_size", 15)
+	mapb.pressed.connect(func() -> void: map_view.visible = true)
 	var gear := _button("⚙", bar)
 	gear.theme_type_variation = "Ghost"
 	gear.custom_minimum_size = Vector2(40, 40)
@@ -526,14 +563,14 @@ func _build_ui() -> void:
 	# --- Mon appareil
 	var me := VBoxContainer.new()
 	me.add_theme_constant_override("separation", 0)
-	me.visible = false  # remplacé par le schéma (blueprint)
 	root.add_child(me)
 	var hero := SpeakerHero.new()
 	hero.kind = 2 if mobile else 1
 	meter = hero
+	hero.visible = false
 	me.add_child(hero)
 	hero_name = _label("", me)
-	hero_name.add_theme_font_size_override("font_size", 24)
+	hero_name.add_theme_font_size_override("font_size", 20)
 	hero_name.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	hero_name.clip_text = true
 	var st := HBoxContainer.new()
@@ -556,23 +593,102 @@ func _build_ui() -> void:
 	sw_mic = _switch_row(cv, "Partager mon micro")
 	sw_mic.toggled.connect(func(on: bool) -> void: _on_share("mic", on))
 
-	# --- Schéma des appareils (blueprint) + réglages de l'appareil écouté sélectionné
+	# --- Favoris + flux actifs
+	fav_title = _hint("Favoris", root)
+	fav_box = HFlowContainer.new()
+	fav_box.add_theme_constant_override("h_separation", 8)
+	fav_box.add_theme_constant_override("v_separation", 8)
+	root.add_child(fav_box)
+	_hint("Flux actifs", root)
 	var ls := ScrollContainer.new()
 	ls.size_flags_vertical = SIZE_EXPAND_FILL
 	ls.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
 	root.add_child(ls)
+	var lv := VBoxContainer.new()
+	lv.size_flags_horizontal = SIZE_EXPAND_FILL
+	lv.add_theme_constant_override("separation", 12)
+	ls.add_child(lv)
+	flows_empty = _hint("Aucun flux pour l'instant. Touchez « Nouveau flux » pour envoyer ou recevoir du son.", lv)
+	flow_list = _vbox(lv, 12)
+	var newb := _button("+  Nouveau flux", root)
+	newb.theme_type_variation = "Primary"
+	newb.pressed.connect(_open_sheet.bind(true))
+	card.visible = false  # plus de réglage « partager » : il se fait par les flux
 	bp = Blueprint.new()
 	bp.size_flags_horizontal = SIZE_EXPAND_FILL
 	bp.size_flags_vertical = SIZE_EXPAND_FILL
-	bp.clicked.connect(_on_bp_click)
-	bp.link.connect(_on_bp_link)
-	bp.unlink.connect(_on_bp_unlink)
-	bp.share.connect(_on_bp_share)
+	bp.readonly = true
 	bp.me["can_snd"] = not mobile
-	ls.add_child(bp)
-	peer_panel = VBoxContainer.new()
-	root.add_child(peer_panel)
-	card.visible = false  # le partage son/micro se fait sur les câbles du schéma
+
+	# --- Feuille « Nouveau flux »
+	sheet = Control.new()
+	sheet.set_anchors_preset(PRESET_FULL_RECT)
+	sheet.visible = false
+	add_child(sheet)
+	var sdim := ColorRect.new()
+	sdim.color = Color(0, 0, 0, 0.6)
+	sdim.set_anchors_preset(PRESET_FULL_RECT)
+	sdim.gui_input.connect(func(ev: InputEvent) -> void:
+		if ev is InputEventMouseButton and ev.pressed:
+			_open_sheet(false))
+	sheet.add_child(sdim)
+	var sm := MarginContainer.new()
+	sm.set_anchors_preset(PRESET_FULL_RECT)
+	sm.mouse_filter = MOUSE_FILTER_IGNORE
+	sm.add_theme_constant_override("margin_top", 160)
+	sheet.add_child(sm)
+	var sp := PanelContainer.new()
+	sp.add_theme_stylebox_override("panel", _sb(C_CARD, 24, 24, 24))
+	sm.add_child(sp)
+	var ssc := ScrollContainer.new()
+	ssc.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	sp.add_child(ssc)
+	sheet_body = VBoxContainer.new()
+	sheet_body.size_flags_horizontal = SIZE_EXPAND_FILL
+	sheet_body.add_theme_constant_override("separation", 12)
+	ssc.add_child(sheet_body)
+
+	# --- Vue Carte (schéma en lecture seule)
+	map_view = ColorRect.new()
+	map_view.color = C_BG
+	map_view.set_anchors_preset(PRESET_FULL_RECT)
+	map_view.visible = false
+	add_child(map_view)
+	var mm := MarginContainer.new()
+	mm.set_anchors_preset(PRESET_FULL_RECT)
+	mm.add_theme_constant_override("margin_left", 16)
+	mm.add_theme_constant_override("margin_right", 16)
+	mm.add_theme_constant_override("margin_top", 16)
+	mm.add_theme_constant_override("margin_bottom", 16)
+	map_view.add_child(mm)
+	var mv := VBoxContainer.new()
+	mv.add_theme_constant_override("separation", 12)
+	mm.add_child(mv)
+	var mh := HBoxContainer.new()
+	mv.add_child(mh)
+	var mt := _label("Carte des appareils", mh)
+	mt.size_flags_horizontal = SIZE_EXPAND_FILL
+	var mcl := _button("✕", mh)
+	mcl.theme_type_variation = "Ghost"
+	mcl.pressed.connect(func() -> void: map_view.visible = false)
+	var msc := ScrollContainer.new()
+	msc.size_flags_vertical = SIZE_EXPAND_FILL
+	msc.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	mv.add_child(msc)
+	msc.add_child(bp)
+
+	# --- Message temporaire
+	var tp := PanelContainer.new()
+	tp.add_theme_stylebox_override("panel", _sb(Color("#232733"), 20, 18, 10, C_BORDER))
+	tp.set_anchors_preset(PRESET_CENTER_BOTTOM)
+	tp.grow_horizontal = GROW_DIRECTION_BOTH
+	tp.grow_vertical = GROW_DIRECTION_BEGIN
+	tp.offset_bottom = -90
+	tp.visible = false
+	tp.mouse_filter = MOUSE_FILTER_IGNORE
+	add_child(tp)
+	toast_lbl = _label("", tp)
+	toast_lbl.mouse_filter = MOUSE_FILTER_IGNORE
 
 	# --- Tiroir de réglages
 	drawer = Control.new()
@@ -634,6 +750,16 @@ func _build_ui() -> void:
 		tr.add_child(pk)
 		type_picks.append(pk)
 	_refresh_type_picks()
+
+	var gp := _vbox(gs, 8)
+	_hint("Code d'appairage de cet appareil", gp)
+	code_lbl = _label("", gp)
+	code_lbl.add_theme_font_size_override("font_size", 30)
+	code_lbl.add_theme_color_override("font_color", C_ACCENT)
+	_refresh_code()
+	_hint("À saisir sur l'autre appareil pour les appairer (une seule fois). Il change après chaque appairage.", gp)
+	_hint("Appareils appairés", gp)
+	trust_box = _vbox(gp, 8)
 
 	var gsh := _vbox(gs, 16)
 	_hint("Ce que je partage", gsh)
@@ -733,6 +859,7 @@ func _switch_row(parent: Node, text: String) -> Switch:
 func _open_drawer(on: bool) -> void:
 	drawer.visible = on
 	if on:
+		_refresh_trust_list()
 		drawer.modulate.a = 0.0
 		create_tween().tween_property(drawer, "modulate:a", 1.0, 0.15)
 	else:
@@ -1200,21 +1327,16 @@ func _recv_process(now: float) -> void:
 				continue
 		var msg := pkt.get_string_from_utf8()
 		if msg.begins_with("SUB|"):
-			subs[key] = {"ip": ip, "port": port, "t": now}
+			if trust.has(msg.substr(4)):  # seuls les appareils appairés peuvent m'écouter
+				subs[key] = {"ip": ip, "port": port, "t": now}
+		elif msg.begins_with("C|"):
+			_on_ctl(msg.split("|"), ip, port, now)
+		elif msg.begins_with("PAIRREQ|"):
+			_on_pairreq(msg.split("|"), ip, port)
+		elif msg.begins_with("PAIROK|"):
+			_on_pairok(msg.split("|"))
 		elif msg == "BYE":
 			subs.erase(key)
-		elif msg.begins_with("INV|"):  # un appareil connu m'invite à l'écouter
-			var iid := msg.substr(4)
-			if peers.has(iid) and not listening.has(iid):
-				listening[iid] = true
-				sub_t = 0.0
-				peers_sig = ""
-		elif msg.begins_with("UNINV|"):
-			var uid := msg.substr(6)
-			if listening.has(uid):
-				_toggle_listen(uid)
-				if selected_peer == uid:
-					selected_peer = ""
 
 
 ## Joue les flux reçus. Le micro reçu va UNIQUEMENT dans le micro virtuel (sortie = soundlink_sink) ;
@@ -1293,6 +1415,7 @@ func _process(delta: float) -> void:
 	_overlay_process(now, delta)
 	_spec_process(now, delta)
 	_ov_spec(now, delta)
+	_flows_process(now, delta)
 
 
 func _overlay_process(now: float, delta: float) -> void:
@@ -1387,14 +1510,13 @@ func _bp_update(now: float) -> void:
 		seen[p["ip"]] = true
 		out.append({"id": id, "type": p.get("type", "c"), "name": p["name"], "snd": p["snd"], "mic": p["mic"], "listen": listening.has(id),
 			"talk": talk, "mute": _pcfg(id)["mute"] if listening.has(id) else false, "sub": sub,
-			"sub_on": sub and cap_kind != "", "sub_lbl": sub_lbl, "invited": invited.has(id) and not sub})
+			"sub_on": sub and cap_kind != "", "sub_lbl": sub_lbl, "invited": pending.has("out:" + str(id)) and not sub})
 	for sb in subs.values():
 		if not seen.has(sb["ip"]) and now - sb["t"] <= TIMEOUT:
 			seen[sb["ip"]] = true
 			out.append({"id": "sub:" + sb["ip"], "type": "p", "name": sb["ip"], "snd": false, "mic": false, "listen": false,
 				"talk": false, "mute": false, "sub": true, "sub_on": cap_kind != "", "sub_lbl": sub_lbl, "invited": false})
 	bp.nodes = out
-	bp.selected = selected_peer
 	bp.me["name"] = hero_name.text
 	bp.me["status"] = pill_txt.text
 	bp.me["state"] = meter.state
@@ -1532,7 +1654,11 @@ func _discovery(now: float, delta: float) -> void:
 		vsink_exists = VSINK in AudioServer.get_output_device_list()
 		var flags := ("1" if cap_kind == "snd" else "0") + ("1" if cap_kind == "mic" else "0") + my_type
 		var msg := ("%s|%s|%d|%s|%s" % [BEACON, my_id, data_port, flags, _my_name().replace("|", " ")]).to_utf8_buffer()
-		for b in _broadcast_addrs():
+		var dests := _broadcast_addrs()
+		var man0 := ip_edit.text.strip_edges()
+		if man0.is_valid_ip_address():
+			dests.append(man0)
+		for b in dests:
 			disc.set_dest_address(b, disc_port)
 			disc.put_packet(msg)
 	while disc.get_available_packet_count() > 0:
@@ -1543,11 +1669,6 @@ func _discovery(now: float, delta: float) -> void:
 		peers[parts[1]] = {"ip": ip, "port": parts[2].to_int(), "snd": parts[3].substr(0, 1) == "1",
 			"mic": parts[3].substr(1, 1) == "1", "name": parts[4], "t": now,
 			"type": parts[3].substr(2, 1) if parts[3].length() > 2 else "c"}
-	var man := ip_edit.text.strip_edges()
-	if man.is_valid_ip_address():  # appareil ajouté à la main (Réglages)
-		peers["manual"] = {"ip": man, "port": data_port, "snd": false, "mic": false, "name": man, "t": now}
-	else:
-		peers.erase("manual")
 	for k in peers.keys():
 		if now - peers[k]["t"] > 4.0:
 			peers.erase(k)
@@ -1556,64 +1677,10 @@ func _discovery(now: float, delta: float) -> void:
 		sig += "|%s%s%s%s" % [k, peers[k]["name"], peers[k]["snd"], peers[k]["mic"]]
 	if sig != peers_sig:
 		peers_sig = sig
-		_rebuild_peers()
+		_refresh_sheet()
 
 
 ## Réglages de l'appareil écouté : volume + muet (icônes), balance G/D (centre par défaut).
-func _peer_controls(id: String) -> void:
-	var pc := _pcfg(id)
-	var pm := MarginContainer.new()
-	pm.add_theme_constant_override("margin_left", 8)
-	pm.add_theme_constant_override("margin_right", 8)
-	pm.add_theme_constant_override("margin_bottom", 8)
-	peer_panel.add_child(pm)
-	var v := _vbox(pm, 8)
-	var r1 := HBoxContainer.new()
-	r1.add_theme_constant_override("separation", 8)
-	v.add_child(r1)
-	r1.add_child(Ico.new("vol", false, 24.0))
-	var vs := _slider(0, 150, pc["vol"] * 100.0, r1)
-	vs.size_flags_horizontal = SIZE_EXPAND_FILL
-	vs.size_flags_vertical = SIZE_SHRINK_CENTER
-	vs.value_changed.connect(func(x: float) -> void: pc["vol"] = x / 100.0)
-	var mb := Ico.new("mute", true)
-	mb.set_on(pc["mute"])
-	mb.toggled.connect(func(on: bool) -> void: pc["mute"] = on)
-	r1.add_child(mb)
-	var r2 := HBoxContainer.new()
-	r2.add_theme_constant_override("separation", 8)
-	v.add_child(r2)
-	var gl := _hint("G", r2)
-	gl.autowrap_mode = TextServer.AUTOWRAP_OFF
-	gl.custom_minimum_size.x = 24
-	gl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	gl.add_theme_font_size_override("font_size", 11)
-	var bs := _slider(-100, 100, pc["bal"] * 100.0, r2)
-	bs.size_flags_horizontal = SIZE_EXPAND_FILL
-	bs.size_flags_vertical = SIZE_SHRINK_CENTER
-	bs.value_changed.connect(func(x: float) -> void: pc["bal"] = x / 100.0)
-	bs.gui_input.connect(func(ev: InputEvent) -> void:
-		if ev is InputEventMouseButton and ev.double_click:
-			bs.value = 0)
-	var dl := _hint("D", r2)
-	dl.autowrap_mode = TextServer.AUTOWRAP_OFF
-	dl.add_theme_font_size_override("font_size", 11)
-	var cb := Ico.new("center", true)
-	cb.pressed.connect(func() -> void: bs.value = 0)
-	r2.add_child(cb)
-
-
-func _rebuild_peers() -> void:
-	for ch in peer_panel.get_children():
-		ch.queue_free()
-	if selected_peer != "" and listening.has(selected_peer) and peers.has(selected_peer):
-		var t := _hint("Réglages : " + str(peers[selected_peer]["name"]), peer_panel)
-		t.add_theme_color_override("font_color", C_ACCENT)
-		_peer_controls(selected_peer)
-	else:
-		selected_peer = ""
-
-
 ## Spectre (28 bandes log 60 Hz–10 kHz, Goertzel) des derniers paquets, 0..1.
 func _spectrum_of(pkts: Array, stereo: bool) -> PackedFloat32Array:
 	var out := PackedFloat32Array()
@@ -1671,56 +1738,524 @@ func _refresh_type_picks() -> void:
 		pk.queue_redraw()
 
 
-func _on_bp_click(id: String) -> void:
-	if listening.has(id):
-		selected_peer = "" if selected_peer == id else id
-		peers_sig = ""
+# ---------------------------------------------------------------- Appairage et contrôle (v4)
+
+func _new_code() -> void:
+	pair_code = "%06d" % (randi() % 1000000)
 
 
-func _on_bp_link(id: String, kind: String) -> void:
-	if not peers.has(id):
+func _hmac(key: String, msg: String) -> String:
+	return Crypto.new().hmac_digest(HashingContext.HASH_SHA256, key.to_utf8_buffer(), msg.to_utf8_buffer()).hex_encode()
+
+
+func _send_raw(ip: String, port: int, msg: String, times := 1) -> void:
+	udp.set_dest_address(ip, port)
+	for i in times:
+		udp.put_packet(msg.to_utf8_buffer())
+
+
+## Commande signée (HMAC avec la clé d'appairage), envoyée 3 fois (UDP) ; idempotente côté récepteur.
+func _send_ctl(id: String, cmd: String, arg := "") -> void:
+	var p: Dictionary = peers.get(id, {})
+	if p.is_empty() or not trust.has(id):
 		return
-	if kind == "in":
+	ctl_nonce = maxi(ctl_nonce + 1, int(Time.get_unix_time_from_system() * 1000.0))
+	var body := "%s|%d|%s|%s" % [my_id, ctl_nonce, cmd, arg]
+	_send_raw(p["ip"], p["port"], "C|%s|%s" % [body, _hmac(trust[id]["key"], body)], 3)
+
+
+func _on_ctl(q: PackedStringArray, ip: String, port: int, now: float) -> void:
+	if q.size() != 6 or not trust.has(q[1]):
+		return
+	if _hmac(trust[q[1]]["key"], "%s|%s|%s|%s" % [q[1], q[2], q[3], q[4]]) != q[5]:
+		return
+	var n := q[2].to_int()
+	if n <= int(ctl_seen.get(q[1], 0)):
+		return  # rejeu / doublon
+	ctl_seen[q[1]] = n
+	var id := q[1]
+	if not peers.has(id):
+		peers[id] = {"ip": ip, "port": port, "snd": false, "mic": false, "name": trust[id]["name"], "t": now, "type": "c"}
+	var nm: String = peers[id]["name"]
+	match q[3]:
+		"OFFER":
+			if not listening.has(id):
+				listening[id] = true
+			want[id] = q[4]
+			sub_t = 0.0
+			_toast("%s vous envoie %s" % [nm, _kind_txt(q[4])])
+		"STOPOFFER":
+			if listening.has(id):
+				_toggle_listen(id)
+		"ASK":
+			if q[4] == "snd" and not OS.has_feature("mobile"):
+				_set_share("snd")
+			elif q[4] == "mic":
+				_ask_mic(nm)
+
+
+func _ask_mic(nm: String) -> void:
+	if cap_kind == "mic":
+		return
+	if confirm == null:
+		confirm = ConfirmationDialog.new()
+		confirm.ok_button_text = "Autoriser"
+		confirm.cancel_button_text = "Refuser"
+		confirm.confirmed.connect(func() -> void: _set_share("mic"))
+		add_child(confirm)
+	confirm.dialog_text = "%s demande à écouter votre micro. Autoriser ?" % nm
+	confirm.popup_centered()
+
+
+func _on_pairreq(q: PackedStringArray, ip: String, port: int) -> void:
+	# PAIRREQ|id|nom|nonce|hmac(code)
+	if q.size() != 5:
+		return
+	if _hmac(pair_code, "%s|%s|%s" % [q[1], q[3], q[2]]) != q[4]:
+		pair_fail += 1
+		if pair_fail >= 5:  # trop d'essais : nouveau code
+			_new_code()
+			pair_fail = 0
+			_refresh_code()
+		return
+	trust[q[1]] = {"key": _hmac(pair_code, "key|%s|%s|%s" % [my_id, q[1], q[3]]), "name": q[2]}
+	var nm := _my_name().replace("|", " ")
+	_send_raw(ip, port, "PAIROK|%s|%s|%s|%s" % [my_id, nm, q[3], _hmac(pair_code, "ok|%s|%s|%s" % [my_id, q[3], nm])], 2)
+	_new_code()
+	pair_fail = 0
+	_save()
+	_refresh_code()
+	_toast("%s est maintenant appairé" % q[2])
+	_refresh_sheet()
+
+
+func _on_pairok(q: PackedStringArray) -> void:
+	# PAIROK|id|nom|nonce|hmac
+	if q.size() != 5 or pair_try.is_empty() or q[3] != pair_try["nonce"]:
+		return
+	if _hmac(pair_try["code"], "ok|%s|%s|%s" % [q[1], q[3], q[2]]) != q[4]:
+		return
+	trust[q[1]] = {"key": _hmac(pair_try["code"], "key|%s|%s|%s" % [q[1], my_id, q[3]]), "name": q[2]}
+	pair_try = {}
+	_save()
+	_toast("Appairage réussi")
+	if sheet_stage == "pair" and sheet_dev == q[1]:
+		sheet_stage = "kinds"
+	_refresh_sheet()
+
+
+func _do_pair(id: String, code: String) -> void:
+	var p: Dictionary = peers.get(id, {})
+	if p.is_empty() or code.length() != 6:
+		_toast("Code à 6 chiffres requis")
+		return
+	var nonce := str(randi())
+	pair_try = {"code": code, "nonce": nonce}
+	var nm := _my_name().replace("|", " ")
+	_send_raw(p["ip"], p["port"], "PAIRREQ|%s|%s|%s|%s" % [my_id, nm, nonce, _hmac(code, "%s|%s|%s" % [my_id, nonce, nm])], 2)
+	get_tree().create_timer(4.0).timeout.connect(func() -> void:
+		if not pair_try.is_empty() and pair_try["nonce"] == nonce:
+			pair_try = {}
+			_toast("Code incorrect ou appareil injoignable"))
+
+
+func _refresh_code() -> void:
+	if code_lbl:
+		code_lbl.text = "%s %s" % [pair_code.substr(0, 3), pair_code.substr(3)]
+
+
+func _toast(t: String) -> void:
+	if toast_lbl == null:
+		return
+	toast_lbl.text = t
+	toast_lbl.get_parent().visible = true
+	toast_lbl.get_parent().modulate.a = 1.0
+	toast_t = 3.0
+
+
+func _set_share(kind: String) -> void:
+	if cap_kind == kind:
+		return
+	var sw: Switch = sw_snd if kind == "snd" else sw_mic
+	if sw:
+		sw.set_on(true)
+	_on_share(kind, true)
+
+
+func _stop_share() -> void:
+	if cap_kind == "":
+		return
+	var sw: Switch = sw_snd if cap_kind == "snd" else sw_mic
+	if sw:
+		sw.set_on(false)
+	_on_share(cap_kind, false)
+
+
+# ---------------------------------------------------------------- Flux (v4)
+
+## dir "out" : j'envoie mon son/micro à id ; dir "in" : je reçois le son/micro de id.
+func _start_flow(id: String, dir: String, kind: String) -> void:
+	if not peers.has(id):
+		_toast("Appareil absent du réseau")
+		return
+	if not trust.has(id):
+		_toast("Appairez d'abord cet appareil")
+		return
+	var now := Time.get_ticks_msec() / 1000.0
+	if dir == "out":
+		_set_share(kind)
+		_send_ctl(id, "OFFER", kind)
+	else:
 		if not listening.has(id):
 			_toggle_listen(id)
-			selected_peer = id
-	else:
-		invited[id] = true
-		_send_to(id, "INV|%s" % my_id)
+		want[id] = kind
+		_send_ctl(id, "ASK", kind)
+	pending["%s:%s" % [dir, id]] = {"t": now, "dir": dir, "id": id, "kind": kind}
+	flows_sig = ""
 
 
-func _on_bp_unlink(id: String, kind: String) -> void:
-	if kind == "in":
+func _stop_flow(dir: String, id: String) -> void:
+	pending.erase("%s:%s" % [dir, id])
+	if dir == "in":
 		if listening.has(id):
 			_toggle_listen(id)
-		if selected_peer == id:
-			selected_peer = ""
 	else:
-		invited.erase(id)
-		_send_to(id, "UNINV|%s" % my_id)
+		_send_ctl(id, "STOPOFFER")
 		var p: Dictionary = peers.get(id, {})
 		for k in subs.keys():
 			if not p.is_empty() and subs[k]["ip"] == p["ip"]:
 				subs.erase(k)
-	peers_sig = ""
+	flows_sig = ""
 
 
-func _on_bp_share(kind: String, on: bool) -> void:
-	var sw: Switch = sw_snd if kind == "snd" else sw_mic
-	if sw == null:
+func _fav_index(id: String, dir: String, kind: String) -> int:
+	for i in favs.size():
+		if favs[i]["id"] == id and favs[i]["dir"] == dir and favs[i]["kind"] == kind:
+			return i
+	return -1
+
+
+func _peer_name(id: String) -> String:
+	if peers.has(id):
+		return peers[id]["name"]
+	return str(trust.get(id, {}).get("name", "appareil"))
+
+
+func _id_for_ip(ip: String) -> String:
+	for id in peers:
+		if peers[id]["ip"] == ip:
+			return id
+	return ""
+
+
+func _flow_items(now: float) -> Array:
+	var items: Array = []
+	for id in listening:
+		var p: Dictionary = peers.get(id, {})
+		if p.is_empty():
+			continue
+		var e: Dictionary = rxs.get("%s:%d" % [p["ip"], p["port"]], {})
+		var kind: String = want.get(id, "snd" if p["snd"] else ("mic" if p["mic"] else "snd"))
+		var live := false
+		for t in ["snd", "mic"]:
+			if e.has(t) and e[t] and now - e[t].last_rx < 1.0:
+				live = true
+				kind = t
+		items.append({"dir": "in", "id": id, "name": p["name"], "type": p.get("type", "c"), "kind": kind, "live": live})
+	var seen := {}
+	for sb in subs.values():
+		if now - sb["t"] > TIMEOUT:
+			continue
+		var id := _id_for_ip(sb["ip"])
+		if id == "" or seen.has(id):
+			continue
+		seen[id] = true
+		items.append({"dir": "out", "id": id, "name": peers[id]["name"], "type": peers[id].get("type", "c"),
+			"kind": cap_kind if cap_kind != "" else "snd", "live": cap_kind != ""})
+	for k in pending.keys():
+		var pd: Dictionary = pending[k]
+		if pd["dir"] == "out" and not seen.has(pd["id"]) and peers.has(pd["id"]):
+			items.append({"dir": "out", "id": pd["id"], "name": peers[pd["id"]]["name"], "type": peers[pd["id"]].get("type", "c"),
+				"kind": pd["kind"], "live": false})
+	return items
+
+
+func _flows_process(now: float, delta: float) -> void:
+	# expiration des demandes sans réponse
+	for k in pending.keys():
+		var pd: Dictionary = pending[k]
+		var done := false
+		if pd["dir"] == "in":
+			var p: Dictionary = peers.get(pd["id"], {})
+			var e: Dictionary = rxs.get("%s:%d" % [p.get("ip", ""), p.get("port", 0)], {})
+			for t in ["snd", "mic"]:
+				if e.has(t) and e[t] and now - e[t].last_rx < 1.0:
+					done = true
+		else:
+			var p2: Dictionary = peers.get(pd["id"], {})
+			for sb in subs.values():
+				if sb["ip"] == p2.get("ip", ""):
+					done = true
+		if done:
+			pending.erase(k)
+		elif now - pd["t"] > 8.0:
+			_toast("%s ne répond pas" % _peer_name(pd["id"]))
+			_stop_flow(pd["dir"], pd["id"])
+	# partage coupé automatiquement quand plus personne n'écoute
+	if cap_kind != "" and subs.is_empty() and not _has_pending_out():
+		idle_t += delta
+		if idle_t > 8.0:
+			_stop_share()
+			idle_t = 0.0
+	else:
+		idle_t = 0.0
+	# toast
+	if toast_t > 0.0:
+		toast_t -= delta
+		if toast_t < 0.5:
+			toast_lbl.get_parent().modulate.a = maxf(toast_t / 0.5, 0.0)
+		if toast_t <= 0.0:
+			toast_lbl.get_parent().visible = false
+	# niveaux
+	for fb in flow_bars:
+		fb["bar"].value = _flow_level(fb["dir"], fb["id"], now)
+	flows_t -= delta
+	if flows_t > 0.0:
 		return
-	sw.set_on(on)
-	_on_share(kind, on)
+	flows_t = 0.15
+	var items := _flow_items(now)
+	var sig := str(items) + str(favs) + str(trust.keys())
+	if sig != flows_sig:
+		flows_sig = sig
+		_build_flows(items)
 
 
-## Message de contrôle (UDP, envoyé 3 fois car non fiable) vers un appareil connu.
-func _send_to(id: String, msg: String) -> void:
+func _has_pending_out() -> bool:
+	for pd in pending.values():
+		if pd["dir"] == "out":
+			return true
+	return false
+
+
+func _peak_of(pkts: Array, stereo: bool) -> float:
+	var pk := 0.0
+	var step := 4 if stereo else 2
+	for b: PackedByteArray in pkts:
+		var n := (b.size() - 12) / step
+		var i := 0
+		while i < n:
+			pk = maxf(pk, absf(b.decode_s16(12 + i * step)) / 32768.0)
+			i += 6
+	return sqrt(pk)
+
+
+func _flow_level(dir: String, id: String, now: float) -> float:
+	if dir == "out":
+		return _peak_of(out_pkts, cap_kind == "snd") if cap_kind != "" else 0.0
 	var p: Dictionary = peers.get(id, {})
-	if p.is_empty():
+	var e: Dictionary = rxs.get("%s:%d" % [p.get("ip", ""), p.get("port", 0)], {})
+	for t in ["snd", "mic"]:
+		if e.has(t) and e[t] and now - e[t].last_rx < 1.0:
+			return _peak_of(e[t].last_pkts, t == "snd")
+	return 0.0
+
+
+func _kind_txt(kind: String) -> String:
+	return "son" if kind == "snd" else "micro"
+
+
+func _build_flows(items: Array) -> void:
+	for ch in flow_list.get_children():
+		ch.queue_free()
+	flow_bars.clear()
+	flows_empty.visible = items.is_empty()
+	for it in items:
+		var card := PanelContainer.new()
+		card.add_theme_stylebox_override("panel", _sb(C_CARD, 16, 14, 12, C_OK if it["live"] else C_BORDER))
+		flow_list.add_child(card)
+		var v := _vbox(card, 8)
+		var h := HBoxContainer.new()
+		h.add_theme_constant_override("separation", 10)
+		v.add_child(h)
+		var ic := DevIcon.new()
+		ic.dev_type = it["type"]
+		ic.selected = false
+		ic.mouse_filter = MOUSE_FILTER_IGNORE
+		ic.custom_minimum_size = Vector2(34, 30)
+		h.add_child(ic)
+		var title := "%s de %s" % [_kind_txt(it["kind"]).capitalize(), it["name"]] if it["dir"] == "in" \
+			else "Mon %s → %s" % [_kind_txt(it["kind"]), it["name"]]
+		var tl := _label(title, h)
+		tl.size_flags_horizontal = SIZE_EXPAND_FILL
+		tl.size_flags_vertical = SIZE_SHRINK_CENTER
+		tl.clip_text = true
+		var fi := _fav_index(it["id"], it["dir"], it["kind"])
+		var star := _button("★" if fi >= 0 else "☆", h)
+		star.theme_type_variation = "Ghost"
+		star.pressed.connect(func() -> void:
+			var j := _fav_index(it["id"], it["dir"], it["kind"])
+			if j >= 0:
+				favs.remove_at(j)
+			else:
+				favs.append({"id": it["id"], "name": it["name"], "dir": it["dir"], "kind": it["kind"], "type": it["type"]})
+			_save()
+			flows_sig = "")
+		var stop := _button("Stop", h)
+		stop.theme_type_variation = "Danger"
+		stop.pressed.connect(_stop_flow.bind(it["dir"], it["id"]))
+		var st := _hint("En direct" if it["live"] else "Connexion…", v)
+		st.add_theme_color_override("font_color", C_OK if it["live"] else C_MUTED)
+		var r2 := HBoxContainer.new()
+		r2.add_theme_constant_override("separation", 10)
+		v.add_child(r2)
+		var bar := LevelBar.new()
+		bar.col = C_OK if it["kind"] == "snd" else C_ACCENT
+		r2.add_child(bar)
+		flow_bars.append({"bar": bar, "dir": it["dir"], "id": it["id"]})
+		if it["dir"] == "in":
+			var pc := _pcfg(it["id"])
+			var vs := _slider(0, 150, pc["vol"] * 100.0, r2)
+			vs.custom_minimum_size.x = 120
+			vs.size_flags_vertical = SIZE_SHRINK_CENTER
+			vs.value_changed.connect(func(x: float) -> void: pc["vol"] = x / 100.0)
+			var mb := Ico.new("mute", true)
+			mb.set_on(pc["mute"])
+			mb.toggled.connect(func(on: bool) -> void: pc["mute"] = on)
+			r2.add_child(mb)
+	# favoris
+	for ch in fav_box.get_children():
+		ch.queue_free()
+	fav_title.visible = not favs.is_empty()
+	fav_box.visible = not favs.is_empty()
+	for f in favs:
+		var fb := Button.new()
+		fb.text = "▶ " + ("%s de %s" % [_kind_txt(f["kind"]), f["name"]] if f["dir"] == "in" else "mon %s → %s" % [_kind_txt(f["kind"]), f["name"]])
+		fb.custom_minimum_size.y = 40
+		fb.pressed.connect(_start_flow.bind(f["id"], f["dir"], f["kind"]))
+		fav_box.add_child(fb)
+
+
+# ---------------------------------------------------------------- Feuille « Nouveau flux »
+
+func _open_sheet(on: bool) -> void:
+	sheet.visible = on
+	if on:
+		sheet_stage = "devices"
+		_refresh_sheet()
+
+
+func _refresh_sheet() -> void:
+	if sheet == null or not sheet.visible:
 		return
-	udp.set_dest_address(p["ip"], p["port"])
-	for i in 3:
-		udp.put_packet(msg.to_utf8_buffer())
+	for ch in sheet_body.get_children():
+		ch.queue_free()
+	match sheet_stage:
+		"devices":
+			_sheet_title("Nouveau flux : avec quel appareil ?")
+			if peers.is_empty():
+				_hint("Aucun appareil détecté. Ouvrez Sound Link sur l'autre appareil, sur le même Wi-Fi.", sheet_body)
+			for id in peers:
+				var p: Dictionary = peers[id]
+				var paired := trust.has(id)
+				_device_row(p.get("type", "c"), p["name"], "appairé" if paired else "à appairer", C_OK if paired else C_MUTED,
+					func() -> void:
+						sheet_dev = id
+						sheet_stage = "kinds" if trust.has(id) else "pair"
+						_refresh_sheet())
+		"pair":
+			var p: Dictionary = peers.get(sheet_dev, {})
+			_sheet_back()
+			_sheet_title("Appairer %s" % p.get("name", ""))
+			_hint("Entrez le code à 6 chiffres affiché dans Réglages sur cet appareil, ou saisissez le vôtre (%s) sur l'autre appareil." % code_lbl.text, sheet_body)
+			var le := LineEdit.new()
+			le.placeholder_text = "Code à 6 chiffres"
+			le.max_length = 6
+			le.virtual_keyboard_type = LineEdit.KEYBOARD_TYPE_NUMBER
+			sheet_body.add_child(le)
+			var go := _button("Appairer", sheet_body)
+			go.theme_type_variation = "Primary"
+			go.pressed.connect(func() -> void: _do_pair(sheet_dev, le.text.strip_edges()))
+			le.text_submitted.connect(func(t: String) -> void: _do_pair(sheet_dev, t.strip_edges()))
+		"kinds":
+			var nm := _peer_name(sheet_dev)
+			_sheet_back()
+			_sheet_title("Avec %s" % nm)
+			var opts: Array = []
+			if not OS.has_feature("mobile"):
+				opts.append(["Envoyer mon son vers %s" % nm, "out", "snd"])
+			opts.append(["Envoyer mon micro vers %s" % nm, "out", "mic"])
+			opts.append(["Recevoir le son de %s" % nm, "in", "snd"])
+			opts.append(["Recevoir le micro de %s" % nm, "in", "mic"])
+			for o in opts:
+				var b := _button(o[0], sheet_body)
+				b.custom_minimum_size.y = 56
+				b.pressed.connect(func() -> void:
+					_start_flow(sheet_dev, o[1], o[2])
+					_open_sheet(false))
+
+
+func _sheet_title(t: String) -> void:
+	var l := _label(t, sheet_body)
+	l.add_theme_font_size_override("font_size", 20)
+
+
+func _sheet_back() -> void:
+	var b := _button("‹ Retour", sheet_body)
+	b.theme_type_variation = "Ghost"
+	b.alignment = HORIZONTAL_ALIGNMENT_LEFT
+	b.pressed.connect(func() -> void:
+		sheet_stage = "devices"
+		_refresh_sheet())
+
+
+func _device_row(type: String, text: String, tag: String, tag_col: Color, cb: Callable) -> void:
+	var b := Button.new()
+	b.theme_type_variation = "Row"
+	b.custom_minimum_size.y = 56
+	b.pressed.connect(cb)
+	sheet_body.add_child(b)
+	var mc := MarginContainer.new()
+	mc.set_anchors_preset(PRESET_FULL_RECT)
+	mc.mouse_filter = MOUSE_FILTER_IGNORE
+	mc.add_theme_constant_override("margin_left", 12)
+	mc.add_theme_constant_override("margin_right", 12)
+	b.add_child(mc)
+	var h := HBoxContainer.new()
+	h.mouse_filter = MOUSE_FILTER_IGNORE
+	h.add_theme_constant_override("separation", 12)
+	mc.add_child(h)
+	var ic := DevIcon.new()
+	ic.dev_type = type
+	ic.mouse_filter = MOUSE_FILTER_IGNORE
+	ic.custom_minimum_size = Vector2(34, 30)
+	h.add_child(ic)
+	var nl := _label(text, h)
+	nl.size_flags_horizontal = SIZE_EXPAND_FILL
+	nl.size_flags_vertical = SIZE_SHRINK_CENTER
+	nl.mouse_filter = MOUSE_FILTER_IGNORE
+	var tl := _hint(tag, h)
+	tl.size_flags_vertical = SIZE_SHRINK_CENTER
+	tl.add_theme_color_override("font_color", tag_col)
+	tl.mouse_filter = MOUSE_FILTER_IGNORE
+
+
+func _refresh_trust_list() -> void:
+	for ch in trust_box.get_children():
+		ch.queue_free()
+	if trust.is_empty():
+		_hint("Aucun appareil appairé.", trust_box)
+	for id in trust:
+		var h := HBoxContainer.new()
+		trust_box.add_child(h)
+		var l := _label(str(trust[id]["name"]), h)
+		l.size_flags_horizontal = SIZE_EXPAND_FILL
+		var b := _button("Oublier", h)
+		b.pressed.connect(func() -> void:
+			_stop_flow("in", id)
+			_stop_flow("out", id)
+			trust.erase(id)
+			_save()
+			_refresh_trust_list())
 
 
 func _broadcast_addrs() -> PackedStringArray:
