@@ -88,7 +88,7 @@ var sw_overlay: Switch
 var overlay_on := true
 var ov_t := 0.0
 var clients_sig := ""
-var clients_list: VBoxContainer
+var clients_list: GridContainer
 var clients_title: Label
 
 
@@ -562,8 +562,10 @@ func _build_ui() -> void:
 	lb.add_child(found_list)
 	clients_title = _hint("Connectés à moi  (oreille : m'écoute · bouche : m'envoie du son)", lb)
 	clients_title.visible = false
-	clients_list = VBoxContainer.new()
-	clients_list.add_theme_constant_override("separation", 10)
+	clients_list = GridContainer.new()
+	clients_list.columns = 2
+	clients_list.add_theme_constant_override("h_separation", 8)
+	clients_list.add_theme_constant_override("v_separation", 8)
 	lb.add_child(clients_list)
 
 	# --- Tiroir de réglages
@@ -1302,16 +1304,19 @@ func _clients_ui(list: Array) -> void:
 		ch.queue_free()
 	clients_title.visible = not list.is_empty()
 	for it in list:
-		var h := HBoxContainer.new()
-		h.add_theme_constant_override("separation", 10)
-		clients_list.add_child(h)
-		var dot := _label("●", h)
-		dot.add_theme_font_size_override("font_size", 10)
-		dot.size_flags_vertical = SIZE_SHRINK_CENTER
-		dot.add_theme_color_override("font_color", C_OK if (it["talk"] or it["ear_on"]) else C_MUTED)
-		var nm := _label(it["name"], h)
-		nm.size_flags_horizontal = SIZE_EXPAND_FILL
+		var card := PanelContainer.new()
+		card.size_flags_horizontal = SIZE_EXPAND_FILL
+		card.add_theme_stylebox_override("panel", _sb(C_CARD, 12, 10, 8, C_OK if it["talk"] else C_BORDER))
+		clients_list.add_child(card)
+		var v := VBoxContainer.new()
+		v.add_theme_constant_override("separation", 4)
+		card.add_child(v)
+		var nm := _label(it["name"], v)
 		nm.clip_text = true
+		nm.add_theme_font_size_override("font_size", 15)
+		var h := HBoxContainer.new()
+		h.add_theme_constant_override("separation", 8)
+		v.add_child(h)
 		for k in 2:
 			var ic := DevIcon.new()
 			ic.ear = k == 0
@@ -1322,7 +1327,7 @@ func _clients_ui(list: Array) -> void:
 			else:
 				ic.col = C_OK if it["talk"] else C_MUTED
 				ic.off = it["mute"]
-			ic.modulate.a = 1.0 if shown else 0.0
+			ic.modulate.a = 1.0 if shown else 0.25
 			h.add_child(ic)
 
 
