@@ -1,4 +1,5 @@
 extends Control
+const DevIcon := preload("res://dev_icon.gd")
 ## Vue « plan technique » : mon appareil en haut, les autres en dessous, reliés par des flèches
 ## orthogonales animées (qui envoie du son à qui). Toucher un appareil : signal clicked(id).
 
@@ -22,7 +23,7 @@ const NH := 70.0
 const ROW := 132.0
 const TOP := 56.0
 
-var me := {"name": "", "status": "", "ll": 0.0, "lr": 0.0, "state": 0, "cap": "", "can_snd": true}
+var me := {"name": "", "status": "", "ll": 0.0, "lr": 0.0, "state": 0, "cap": "", "can_snd": true, "type": "c"}
 var nodes: Array = []  # {id, name, snd, mic, listen, talk, mute, sub, sub_on, sub_lbl}
 var selected := ""
 var font: Font
@@ -147,6 +148,39 @@ func _edge(pts: PackedVector2Array, col: Color, active: bool, reverse: bool) -> 
 	draw_colored_polygon(PackedVector2Array([end, end - dir * 9 + n * 5, end - dir * 9 - n * 5]), col)
 
 
+## Visage 2D : oreilles (ondes quand ça écoute) et bouche (s'ouvre quand ça parle).
+func _face(c: Vector2, talk: bool, amp: float, hearing: bool, muted: bool, col: Color) -> void:
+	var r := 17.0
+	draw_circle(c, r, Color(0.08, 0.16, 0.32))
+	draw_arc(c, r, 0, TAU, 32, col, 1.8, true)
+	for sd in [-1.0, 1.0]:
+		var ec := c + Vector2(sd * (r + 3), 1)
+		draw_arc(ec, 5.5, 0, TAU, 14, col, 1.6, true)
+		if hearing:
+			for k in 2:
+				var ph := fposmod(t * 1.6 + k * 0.5, 1.0)
+				var rr := 8.0 + ph * 8.0
+				var a0 := 0.0 if sd > 0 else PI
+				draw_arc(ec, rr, a0 - 0.8, a0 + 0.8, 10, Color(col, 1.0 - ph), 1.6, true)
+	var blink := fposmod(t, 3.4) > 3.25
+	for sd in [-1.0, 1.0]:
+		var ep := c + Vector2(sd * 6.5, -4)
+		if blink:
+			draw_line(ep + Vector2(-2, 0), ep + Vector2(2, 0), col, 1.5)
+		else:
+			draw_circle(ep, 2.0, TEXT)
+	var mp := c + Vector2(0, 8)
+	if talk:
+		var h := 1.5 + amp * 5.5
+		draw_set_transform(mp, 0, Vector2(1.0, h / 4.0))
+		draw_circle(Vector2.ZERO, 4.0, col)
+		draw_set_transform(Vector2.ZERO)
+	else:
+		draw_line(mp + Vector2(-4, 0), mp + Vector2(4, 0), col, 1.8, true)
+	if muted:
+		draw_line(mp + Vector2(-6, 5), mp + Vector2(6, -5), RED, 2.2, true)
+
+
 func _pill(r: Rect2, label: String, on: bool, col: Color) -> void:
 	draw_rect(r, col.darkened(0.55) if on else BG)
 	draw_rect(r, col if on else DIM, false, 1.5)
@@ -202,14 +236,21 @@ func _draw() -> void:
 	draw_rect(mr, Color(0.06, 0.12, 0.24, 0.9))
 	draw_rect(mr, AMBER, false, 2.0)
 	_corner_ticks(mr, AMBER)
-	_txt("CET APPAREIL", Vector2(mr.position.x + 10, mr.position.y + 15), 10, AMBER)
-	_txt(str(me["name"]), Vector2(mr.position.x + 10, mr.position.y + 36), 17, TEXT, mw - 20)
-	_txt(str(me["status"]), Vector2(mr.position.x + 10, mr.position.y + 54), 12, OK if live else MUTED, mw - 20)
+	var lvl := (float(me["ll"]) + float(me["lr"])) * 0.5
+	var me_talk: bool = me["cap"] != ""
+	var me_hear := false
+	for nd in nodes:
+		me_hear = me_hear or (nd["listen"] and nd["talk"])
+	_face(Vector2(mr.position.x + 38, mr.position.y + 38), me_talk, clampf(lvl * 1.5, 0.15, 1.0) if me_talk else 0.0, me_hear, false, AMBER)
+	DevIcon.draw_device(self, Vector2(mr.end.x - 18, mr.position.y + 20), me["type"], AMBER)
+	_txt("CET APPAREIL", Vector2(mr.position.x + 74, mr.position.y + 15), 10, AMBER)
+	_txt(str(me["name"]), Vector2(mr.position.x + 74, mr.position.y + 36), 15, TEXT, mw - 110)
+	_txt(str(me["status"]), Vector2(mr.position.x + 74, mr.position.y + 54), 11, OK if live else MUTED, mw - 84)
 	for k in 2:
 		var lv: float = me["ll"] if k == 0 else me["lr"]
 		var by := mr.end.y - 12 + k * 5.0
-		draw_rect(Rect2(mr.position.x + 10, by, mw - 20, 3), Color(0.2, 0.3, 0.5, 0.5))
-		draw_rect(Rect2(mr.position.x + 10, by, (mw - 20) * clampf(lv, 0, 1), 3), OK)
+		draw_rect(Rect2(mr.position.x + 74, by, mw - 84, 3), Color(0.2, 0.3, 0.5, 0.5))
+		draw_rect(Rect2(mr.position.x + 74, by, (mw - 84) * clampf(lv, 0, 1), 3), OK)
 	var any_in := false
 	var any_out := false
 	for nd in nodes:
@@ -275,19 +316,23 @@ func _draw() -> void:
 		else:
 			_dashed_rect(r, bc, 1.5)
 		_corner_ticks(r, bc)
-		_txt(str(nd["name"]), Vector2(r.position.x + 10, r.position.y + 28), 15, TEXT if linked else MUTED, NW - 20)
+		var fcol: Color = TEXT if linked else DIM
+		var amp := absf(sin(t * 13.0 + n * 1.7)) * 0.7 + 0.3
+		_face(Vector2(r.position.x + 34, r.position.y + 36), nd["talk"], amp, nd["sub_on"], nd["listen"] and nd["mute"], OK if nd["talk"] else (fcol if linked else DIM))
+		DevIcon.draw_device(self, Vector2(r.end.x - 15, r.position.y + 17), nd["type"], MUTED if linked else DIM)
+		_txt(str(nd["name"]), Vector2(r.position.x + 66, r.position.y + 28), 14, TEXT if linked else MUTED, NW - 100)
 		var what: PackedStringArray = []
 		if nd["snd"]:
 			what.append("son")
 		if nd["mic"]:
 			what.append("micro")
-		_txt("partage : " + (", ".join(what) if not what.is_empty() else "rien"), Vector2(r.position.x + 10, r.position.y + 46), 11, MUTED, NW - 20)
+		_txt("partage : " + (", ".join(what) if not what.is_empty() else "rien"), Vector2(r.position.x + 66, r.position.y + 46), 10, MUTED, NW - 76)
 		var st := "vous écoute" if nd["sub"] else ("invité…" if nd["invited"] else "")
 		if nd["listen"]:
 			st = "échange" if nd["sub"] else "écouté"
 		if nd["listen"] and nd["mute"]:
 			st += " · MUET"
-		_txt(st, Vector2(r.position.x + 10, r.position.y + 63), 11, OK if (nd["talk"] or nd["sub_on"]) else DIM, NW - 20)
+		_txt(st, Vector2(r.position.x + 66, r.position.y + 63), 10, OK if (nd["talk"] or nd["sub_on"]) else DIM, NW - 76)
 
 	_port("__me", "in", me_in, any_in)
 	_port("__me", "out", me_out, any_out)

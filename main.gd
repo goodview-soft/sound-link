@@ -88,6 +88,8 @@ var ov_t := 0.0
 var bp: Control
 var peer_panel: VBoxContainer
 var selected_peer := ""
+var my_type := "c"
+var type_picks: Array = []
 var invited := {}  # id -> true : appareils que j'ai invités à m'écouter
 
 
@@ -432,6 +434,7 @@ func _ready() -> void:
 	if my_id == "":
 		my_id = str(randi())
 	peer_cfg = cfg.get_value("peers", "cfg", {})
+	my_type = cfg.get_value("app", "type", "p" if OS.has_feature("mobile") else "c")
 	overlay_on = cfg.get_value("app", "overlay", true)
 	_build_ui()
 	if not OS.has_feature("mobile"):
@@ -467,6 +470,7 @@ func _save() -> void:
 	cfg.set_value("listen", "balance", balance)
 	cfg.set_value("app", "id", my_id)
 	cfg.set_value("app", "overlay", overlay_on)
+	cfg.set_value("app", "type", my_type)
 	cfg.set_value("peers", "cfg", peer_cfg)
 	cfg.set_value("app", "ip", ip_edit.text)
 	cfg.set_value("app", "name", name_edit.text)
@@ -610,6 +614,20 @@ func _build_ui() -> void:
 	if name_edit.text == "":
 		name_edit.text = _device_name()
 	g0.add_child(name_edit)
+	_hint("Type d'appareil", g0)
+	var tr := HBoxContainer.new()
+	tr.add_theme_constant_override("separation", 10)
+	g0.add_child(tr)
+	for ty in ["p", "c", "e"]:
+		var pk := DevIcon.new()
+		pk.dev_type = ty
+		pk.custom_minimum_size = Vector2(56, 44)
+		pk.picked.connect(func() -> void:
+			my_type = ty
+			_refresh_type_picks())
+		tr.add_child(pk)
+		type_picks.append(pk)
+	_refresh_type_picks()
 
 	var gsh := _vbox(gs, 16)
 	_hint("Ce que je partage", gsh)
@@ -1321,13 +1339,13 @@ func _bp_update(now: float) -> void:
 			if sb["ip"] == p["ip"] and now - sb["t"] <= TIMEOUT:
 				sub = true
 		seen[p["ip"]] = true
-		out.append({"id": id, "name": p["name"], "snd": p["snd"], "mic": p["mic"], "listen": listening.has(id),
+		out.append({"id": id, "type": p.get("type", "c"), "name": p["name"], "snd": p["snd"], "mic": p["mic"], "listen": listening.has(id),
 			"talk": talk, "mute": _pcfg(id)["mute"] if listening.has(id) else false, "sub": sub,
 			"sub_on": sub and cap_kind != "", "sub_lbl": sub_lbl, "invited": invited.has(id) and not sub})
 	for sb in subs.values():
 		if not seen.has(sb["ip"]) and now - sb["t"] <= TIMEOUT:
 			seen[sb["ip"]] = true
-			out.append({"id": "sub:" + sb["ip"], "name": sb["ip"], "snd": false, "mic": false, "listen": false,
+			out.append({"id": "sub:" + sb["ip"], "type": "p", "name": sb["ip"], "snd": false, "mic": false, "listen": false,
 				"talk": false, "mute": false, "sub": true, "sub_on": cap_kind != "", "sub_lbl": sub_lbl, "invited": false})
 	bp.nodes = out
 	bp.selected = selected_peer
@@ -1335,6 +1353,7 @@ func _bp_update(now: float) -> void:
 	bp.me["status"] = pill_txt.text
 	bp.me["state"] = meter.state
 	bp.me["cap"] = cap_kind
+	bp.me["type"] = my_type
 
 
 func _update_status(now: float) -> void:
@@ -1465,7 +1484,7 @@ func _discovery(now: float, delta: float) -> void:
 	if beacon_t <= 0.0:
 		beacon_t = 1.0
 		vsink_exists = VSINK in AudioServer.get_output_device_list()
-		var flags := ("1" if cap_kind == "snd" else "0") + ("1" if cap_kind == "mic" else "0")
+		var flags := ("1" if cap_kind == "snd" else "0") + ("1" if cap_kind == "mic" else "0") + my_type
 		var msg := ("%s|%s|%d|%s|%s" % [BEACON, my_id, data_port, flags, _my_name().replace("|", " ")]).to_utf8_buffer()
 		for b in _broadcast_addrs():
 			disc.set_dest_address(b, disc_port)
@@ -1476,7 +1495,8 @@ func _discovery(now: float, delta: float) -> void:
 		if parts.size() < 5 or parts[0] != BEACON or parts[1] == my_id:
 			continue
 		peers[parts[1]] = {"ip": ip, "port": parts[2].to_int(), "snd": parts[3].substr(0, 1) == "1",
-			"mic": parts[3].substr(1, 1) == "1", "name": parts[4], "t": now}
+			"mic": parts[3].substr(1, 1) == "1", "name": parts[4], "t": now,
+			"type": parts[3].substr(2, 1) if parts[3].length() > 2 else "c"}
 	var man := ip_edit.text.strip_edges()
 	if man.is_valid_ip_address():  # appareil ajouté à la main (Réglages)
 		peers["manual"] = {"ip": man, "port": data_port, "snd": false, "mic": false, "name": man, "t": now}
@@ -1546,6 +1566,12 @@ func _rebuild_peers() -> void:
 		_peer_controls(selected_peer)
 	else:
 		selected_peer = ""
+
+
+func _refresh_type_picks() -> void:
+	for pk in type_picks:
+		pk.selected = pk.dev_type == my_type
+		pk.queue_redraw()
 
 
 func _on_bp_click(id: String) -> void:
