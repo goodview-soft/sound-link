@@ -1266,6 +1266,19 @@ func _overlay_process(now: float, delta: float) -> void:
 				if e.has(t) and e[t] and now - e[t].last_rx < 1.0:
 					talk = true
 			list.append({"name": p["name"], "talk": talk, "mute": _pcfg(id)["mute"], "me": false})
+		var seen := {}  # appareils qui m'écoutent (ex. le téléphone), sans doublon
+		for id in listening:
+			if peers.has(id):
+				seen[peers[id]["ip"]] = true
+		for sb in subs.values():
+			if seen.has(sb["ip"]) or now - sb["t"] > TIMEOUT:
+				continue
+			seen[sb["ip"]] = true
+			var nm: String = sb["ip"]
+			for p in peers.values():
+				if p["ip"] == sb["ip"]:
+					nm = p["name"]
+			list.append({"name": nm, "talk": cap_kind != "", "mute": false, "me": false})
 	if str(list) != str(overlay.items):
 		overlay.set_items(list)
 
