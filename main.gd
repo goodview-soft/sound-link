@@ -88,6 +88,7 @@ var ov_t := 0.0
 var bp: Control
 var peer_panel: VBoxContainer
 var selected_peer := ""
+var invited := {}  # id -> true : appareils que j'ai invités à m'écouter
 
 
 # ---------------------------------------------------------------- Réception d'un flux
@@ -554,10 +555,14 @@ func _build_ui() -> void:
 	bp.size_flags_horizontal = SIZE_EXPAND_FILL
 	bp.size_flags_vertical = SIZE_EXPAND_FILL
 	bp.clicked.connect(_on_bp_click)
+	bp.link.connect(_on_bp_link)
+	bp.unlink.connect(_on_bp_unlink)
+	bp.share.connect(_on_bp_share)
+	bp.me["can_snd"] = not mobile
 	ls.add_child(bp)
 	peer_panel = VBoxContainer.new()
 	root.add_child(peer_panel)
-	root.move_child(card, root.get_child_count() - 1)  # mes partages en bas
+	card.visible = false  # le partage son/micro se fait sur les câbles du schéma
 
 	# --- Tiroir de réglages
 	drawer = Control.new()
@@ -1171,6 +1176,18 @@ func _recv_process(now: float) -> void:
 			subs[key] = {"ip": ip, "port": port, "t": now}
 		elif msg == "BYE":
 			subs.erase(key)
+		elif msg.begins_with("INV|"):  # un appareil connu m'invite à l'écouter
+			var iid := msg.substr(4)
+			if peers.has(iid) and not listening.has(iid):
+				listening[iid] = true
+				sub_t = 0.0
+				peers_sig = ""
+		elif msg.begins_with("UNINV|"):
+			var uid := msg.substr(6)
+			if listening.has(uid):
+				_toggle_listen(uid)
+				if selected_peer == uid:
+					selected_peer = ""
 
 
 ## Joue les flux reçus. Le micro reçu va UNIQUEMENT dans le micro virtuel (sortie = soundlink_sink) ;
@@ -1306,17 +1323,18 @@ func _bp_update(now: float) -> void:
 		seen[p["ip"]] = true
 		out.append({"id": id, "name": p["name"], "snd": p["snd"], "mic": p["mic"], "listen": listening.has(id),
 			"talk": talk, "mute": _pcfg(id)["mute"] if listening.has(id) else false, "sub": sub,
-			"sub_on": sub and cap_kind != "", "sub_lbl": sub_lbl})
+			"sub_on": sub and cap_kind != "", "sub_lbl": sub_lbl, "invited": invited.has(id) and not sub})
 	for sb in subs.values():
 		if not seen.has(sb["ip"]) and now - sb["t"] <= TIMEOUT:
 			seen[sb["ip"]] = true
 			out.append({"id": "sub:" + sb["ip"], "name": sb["ip"], "snd": false, "mic": false, "listen": false,
-				"talk": false, "mute": false, "sub": true, "sub_on": cap_kind != "", "sub_lbl": sub_lbl})
+				"talk": false, "mute": false, "sub": true, "sub_on": cap_kind != "", "sub_lbl": sub_lbl, "invited": false})
 	bp.nodes = out
 	bp.selected = selected_peer
 	bp.me["name"] = hero_name.text
 	bp.me["status"] = pill_txt.text
 	bp.me["state"] = meter.state
+	bp.me["cap"] = cap_kind
 
 
 func _update_status(now: float) -> void:
@@ -1531,17 +1549,55 @@ func _rebuild_peers() -> void:
 
 
 func _on_bp_click(id: String) -> void:
+	if listening.has(id):
+		selected_peer = "" if selected_peer == id else id
+		peers_sig = ""
+
+
+func _on_bp_link(id: String, kind: String) -> void:
 	if not peers.has(id):
 		return
-	if not listening.has(id):
-		_toggle_listen(id)
-		selected_peer = id
-	elif selected_peer == id:
-		_toggle_listen(id)
-		selected_peer = ""
+	if kind == "in":
+		if not listening.has(id):
+			_toggle_listen(id)
+			selected_peer = id
 	else:
-		selected_peer = id
+		invited[id] = true
+		_send_to(id, "INV|%s" % my_id)
+
+
+func _on_bp_unlink(id: String, kind: String) -> void:
+	if kind == "in":
+		if listening.has(id):
+			_toggle_listen(id)
+		if selected_peer == id:
+			selected_peer = ""
+	else:
+		invited.erase(id)
+		_send_to(id, "UNINV|%s" % my_id)
+		var p: Dictionary = peers.get(id, {})
+		for k in subs.keys():
+			if not p.is_empty() and subs[k]["ip"] == p["ip"]:
+				subs.erase(k)
 	peers_sig = ""
+
+
+func _on_bp_share(kind: String, on: bool) -> void:
+	var sw: Switch = sw_snd if kind == "snd" else sw_mic
+	if sw == null:
+		return
+	sw.set_on(on)
+	_on_share(kind, on)
+
+
+## Message de contrôle (UDP, envoyé 3 fois car non fiable) vers un appareil connu.
+func _send_to(id: String, msg: String) -> void:
+	var p: Dictionary = peers.get(id, {})
+	if p.is_empty():
+		return
+	udp.set_dest_address(p["ip"], p["port"])
+	for i in 3:
+		udp.put_packet(msg.to_utf8_buffer())
 
 
 func _broadcast_addrs() -> PackedStringArray:
