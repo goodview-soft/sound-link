@@ -2,6 +2,7 @@ extends Window
 ## Petit overlay façon Discord en bas de l'écran : pastilles des appareils connectés,
 ## anneau vert quand l'appareil parle. Transparent, toujours au-dessus, insensible à la souris.
 
+const DevIcon := preload("res://dev_icon.gd")
 const C_BG := Color(0.08, 0.09, 0.12, 0.88)
 const C_TEXT := Color("#e7eaf0")
 const C_OK := Color("#5eead4")
@@ -58,19 +59,8 @@ func set_items(list: Array) -> void:
 	canvas.queue_redraw()
 
 
-## Oreille (l'appareil m'écoute) ou bouche (il m'envoie du son). off = barré en rouge.
 func _icon(c: Vector2, ear: bool, col: Color, off: bool) -> void:
-	if ear:
-		canvas.draw_arc(c + Vector2(0, -2), 7, deg_to_rad(150), deg_to_rad(400), 18, col, 2.2, true)
-		canvas.draw_arc(c + Vector2(1, -1), 3.2, deg_to_rad(180), deg_to_rad(380), 10, col, 2.0, true)
-		canvas.draw_line(c + Vector2(-5, 3), c + Vector2(-1, 8), col, 2.2, true)
-		canvas.draw_line(c + Vector2(-1, 8), c + Vector2(3, 8), col, 2.2, true)
-	else:
-		canvas.draw_arc(c, 9, deg_to_rad(15), deg_to_rad(165), 14, col, 2.4, true)
-		canvas.draw_line(c + Vector2(-8, 0), c + Vector2(8, 0), col, 2.0, true)
-		canvas.draw_arc(c + Vector2(0, -1), 6, deg_to_rad(200), deg_to_rad(340), 10, col, 2.0, true)
-	if off:
-		canvas.draw_line(c + Vector2(-9, 9), c + Vector2(9, -9), Color("#f87171"), 2.6, true)
+	DevIcon.draw_icon(canvas, c, ear, col, off)
 
 
 func _draw_items() -> void:

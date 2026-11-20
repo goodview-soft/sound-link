@@ -11,6 +11,7 @@ const PREBUFFER := 4
 const CFG_PATH := "user://settings.cfg"
 const SND_TAG := "SND1"  # flux « son » : SND1 + seq u32 + rate u32 + PCM s16 stéréo
 const MIC_TAG := "MIC1"  # flux « micro » : MIC1 + seq u32 + rate u32 + PCM s16 mono
+const DevIcon := preload("res://dev_icon.gd")
 const VSINK := "soundlink_sink"
 const VERSION: String = preload("res://version.gd").VERSION
 const UPDATE_URL := "https://github.com/goodview-soft/sound-link/releases/latest/download/version.json"
@@ -86,6 +87,9 @@ var overlay: Window
 var sw_overlay: Switch
 var overlay_on := true
 var ov_t := 0.0
+var clients_sig := ""
+var clients_list: VBoxContainer
+var clients_title: Label
 
 
 # ---------------------------------------------------------------- Réception d'un flux
@@ -556,6 +560,11 @@ func _build_ui() -> void:
 	found_list = VBoxContainer.new()
 	found_list.add_theme_constant_override("separation", 0)
 	lb.add_child(found_list)
+	clients_title = _hint("Connectés à moi  (oreille : m'écoute · bouche : m'envoie du son)", lb)
+	clients_title.visible = false
+	clients_list = VBoxContainer.new()
+	clients_list.add_theme_constant_override("separation", 10)
+	lb.add_child(clients_list)
 
 	# --- Tiroir de réglages
 	drawer = Control.new()
@@ -1246,14 +1255,20 @@ func _process(delta: float) -> void:
 
 
 func _overlay_process(now: float, delta: float) -> void:
-	if overlay == null:
-		return
 	ov_t -= delta
 	if ov_t > 0.0:
 		return
 	ov_t = 0.15
+	var list := _conn_rows(now)
+	if overlay != null:
+		overlay.set_items(list if overlay_on else [])
+	_clients_ui(list)
+
+
+## Appareils connectés (que j'écoute et/ou qui m'écoutent), un par IP.
+func _conn_rows(now: float) -> Array:
 	var rows := {}  # ip -> {name, mouth, talk, mute, ear, ear_on}
-	if overlay_on:
+	if true:
 		for id in listening:
 			if not peers.has(id):
 				continue
@@ -1275,9 +1290,40 @@ func _overlay_process(now: float, delta: float) -> void:
 				rows[sb["ip"]] = {"name": nm, "mouth": false, "talk": false, "mute": false, "ear": false, "ear_on": false}
 			rows[sb["ip"]]["ear"] = true
 			rows[sb["ip"]]["ear_on"] = cap_kind != ""  # barré si je ne partage rien
-	var list: Array = rows.values()
-	if str(list) != str(overlay.items):
-		overlay.set_items(list)
+	return rows.values()
+
+
+func _clients_ui(list: Array) -> void:
+	var sig := str(list)
+	if sig == clients_sig:
+		return
+	clients_sig = sig
+	for ch in clients_list.get_children():
+		ch.queue_free()
+	clients_title.visible = not list.is_empty()
+	for it in list:
+		var h := HBoxContainer.new()
+		h.add_theme_constant_override("separation", 10)
+		clients_list.add_child(h)
+		var dot := _label("●", h)
+		dot.add_theme_font_size_override("font_size", 10)
+		dot.size_flags_vertical = SIZE_SHRINK_CENTER
+		dot.add_theme_color_override("font_color", C_OK if (it["talk"] or it["ear_on"]) else C_MUTED)
+		var nm := _label(it["name"], h)
+		nm.size_flags_horizontal = SIZE_EXPAND_FILL
+		nm.clip_text = true
+		for k in 2:
+			var ic := DevIcon.new()
+			ic.ear = k == 0
+			var shown: bool = it["ear"] if k == 0 else it["mouth"]
+			if k == 0:
+				ic.col = C_OK if it["ear_on"] else C_MUTED
+				ic.off = not it["ear_on"]
+			else:
+				ic.col = C_OK if it["talk"] else C_MUTED
+				ic.off = it["mute"]
+			ic.modulate.a = 1.0 if shown else 0.0
+			h.add_child(ic)
 
 
 func _update_status(now: float) -> void:
