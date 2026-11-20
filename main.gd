@@ -12,6 +12,7 @@ const CFG_PATH := "user://settings.cfg"
 const SND_TAG := "SND1"  # flux « son » : SND1 + seq u32 + rate u32 + PCM s16 stéréo
 const MIC_TAG := "MIC1"  # flux « micro » : MIC1 + seq u32 + rate u32 + PCM s16 mono
 const DevIcon := preload("res://dev_icon.gd")
+const Blueprint := preload("res://blueprint.gd")
 const VSINK := "soundlink_sink"
 const VERSION: String = preload("res://version.gd").VERSION
 const UPDATE_URL := "https://github.com/goodview-soft/sound-link/releases/latest/download/version.json"
@@ -75,9 +76,6 @@ var main_margin: MarginContainer
 var drawer: Control
 var drawer_margin: MarginContainer
 var upd_dot: Label
-var list_title: Label
-var found_lbl: Label
-var found_list: VBoxContainer
 var hero_name: Label
 var upd_lbl: Label
 var upd_btn: Button
@@ -87,9 +85,9 @@ var overlay: Window
 var sw_overlay: Switch
 var overlay_on := true
 var ov_t := 0.0
-var clients_sig := ""
-var clients_list: GridContainer
-var clients_title: Label
+var bp: Control
+var peer_panel: VBoxContainer
+var selected_peer := ""
 
 
 # ---------------------------------------------------------------- Réception d'un flux
@@ -517,6 +515,7 @@ func _build_ui() -> void:
 	# --- Mon appareil
 	var me := VBoxContainer.new()
 	me.add_theme_constant_override("separation", 0)
+	me.visible = false  # remplacé par le schéma (blueprint)
 	root.add_child(me)
 	var hero := SpeakerHero.new()
 	hero.kind = 2 if mobile else 1
@@ -546,27 +545,19 @@ func _build_ui() -> void:
 	sw_mic = _switch_row(cv, "Partager mon micro")
 	sw_mic.toggled.connect(func(on: bool) -> void: _on_share("mic", on))
 
-	# --- Appareils à proximité
-	list_title = _hint("Appareils à proximité", root)
+	# --- Schéma des appareils (blueprint) + réglages de l'appareil écouté sélectionné
 	var ls := ScrollContainer.new()
 	ls.size_flags_vertical = SIZE_EXPAND_FILL
 	ls.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
 	root.add_child(ls)
-	var lb := VBoxContainer.new()
-	lb.size_flags_horizontal = SIZE_EXPAND_FILL
-	lb.add_theme_constant_override("separation", 0)
-	ls.add_child(lb)
-	found_lbl = _hint("", lb)
-	found_list = VBoxContainer.new()
-	found_list.add_theme_constant_override("separation", 0)
-	lb.add_child(found_list)
-	clients_title = _hint("Connectés à moi  (oreille : m'écoute · bouche : m'envoie du son)", lb)
-	clients_title.visible = false
-	clients_list = GridContainer.new()
-	clients_list.columns = 2
-	clients_list.add_theme_constant_override("h_separation", 8)
-	clients_list.add_theme_constant_override("v_separation", 8)
-	lb.add_child(clients_list)
+	bp = Blueprint.new()
+	bp.size_flags_horizontal = SIZE_EXPAND_FILL
+	bp.size_flags_vertical = SIZE_EXPAND_FILL
+	bp.clicked.connect(_on_bp_click)
+	ls.add_child(bp)
+	peer_panel = VBoxContainer.new()
+	root.add_child(peer_panel)
+	root.move_child(card, root.get_child_count() - 1)  # mes partages en bas
 
 	# --- Tiroir de réglages
 	drawer = Control.new()
@@ -1251,6 +1242,8 @@ func _process(delta: float) -> void:
 	level_l = maxf(level_l * 0.88, peaks.x)
 	level_r = maxf(level_r * 0.88, peaks.y)
 	meter.set_levels(sqrt(level_l), sqrt(level_r))
+	bp.me["ll"] = sqrt(level_l)
+	bp.me["lr"] = sqrt(level_r)
 	_discovery(now, delta)
 	_update_status(now)
 	_overlay_process(now, delta)
@@ -1264,10 +1257,10 @@ func _overlay_process(now: float, delta: float) -> void:
 	var list := _conn_rows(now)
 	if overlay != null:
 		overlay.set_items(list if overlay_on else [])
-	_clients_ui(list)
+	_bp_update(now)
 
 
-## Appareils connectés (que j'écoute et/ou qui m'écoutent), un par IP.
+## Appareils connectés (que j'écoute et/ou qui m'écoutent), un par IP (overlay).
 func _conn_rows(now: float) -> Array:
 	var rows := {}  # ip -> {name, mouth, talk, mute, ear, ear_on}
 	if true:
@@ -1295,40 +1288,35 @@ func _conn_rows(now: float) -> Array:
 	return rows.values()
 
 
-func _clients_ui(list: Array) -> void:
-	var sig := str(list)
-	if sig == clients_sig:
-		return
-	clients_sig = sig
-	for ch in clients_list.get_children():
-		ch.queue_free()
-	clients_title.visible = not list.is_empty()
-	for it in list:
-		var card := PanelContainer.new()
-		card.size_flags_horizontal = SIZE_EXPAND_FILL
-		card.add_theme_stylebox_override("panel", _sb(C_CARD, 12, 10, 8, C_OK if it["talk"] else C_BORDER))
-		clients_list.add_child(card)
-		var v := VBoxContainer.new()
-		v.add_theme_constant_override("separation", 4)
-		card.add_child(v)
-		var nm := _label(it["name"], v)
-		nm.clip_text = true
-		nm.add_theme_font_size_override("font_size", 15)
-		var h := HBoxContainer.new()
-		h.add_theme_constant_override("separation", 8)
-		v.add_child(h)
-		for k in 2:
-			var ic := DevIcon.new()
-			ic.ear = k == 0
-			var shown: bool = it["ear"] if k == 0 else it["mouth"]
-			if k == 0:
-				ic.col = C_OK if it["ear_on"] else C_MUTED
-				ic.off = not it["ear_on"]
-			else:
-				ic.col = C_OK if it["talk"] else C_MUTED
-				ic.off = it["mute"]
-			ic.modulate.a = 1.0 if shown else 0.25
-			h.add_child(ic)
+func _bp_update(now: float) -> void:
+	var out: Array = []
+	var sub_lbl := "mon son" if cap_kind == "snd" else ("mon micro" if cap_kind == "mic" else "")
+	var seen := {}
+	for id in peers:
+		var p: Dictionary = peers[id]
+		var e: Dictionary = rxs.get("%s:%d" % [p["ip"], p["port"]], {})
+		var talk := false
+		for t in ["snd", "mic"]:
+			if e.has(t) and e[t] and now - e[t].last_rx < 1.0:
+				talk = true
+		var sub := false
+		for sb in subs.values():
+			if sb["ip"] == p["ip"] and now - sb["t"] <= TIMEOUT:
+				sub = true
+		seen[p["ip"]] = true
+		out.append({"id": id, "name": p["name"], "snd": p["snd"], "mic": p["mic"], "listen": listening.has(id),
+			"talk": talk, "mute": _pcfg(id)["mute"] if listening.has(id) else false, "sub": sub,
+			"sub_on": sub and cap_kind != "", "sub_lbl": sub_lbl})
+	for sb in subs.values():
+		if not seen.has(sb["ip"]) and now - sb["t"] <= TIMEOUT:
+			seen[sb["ip"]] = true
+			out.append({"id": "sub:" + sb["ip"], "name": sb["ip"], "snd": false, "mic": false, "listen": false,
+				"talk": false, "mute": false, "sub": true, "sub_on": cap_kind != "", "sub_lbl": sub_lbl})
+	bp.nodes = out
+	bp.selected = selected_peer
+	bp.me["name"] = hero_name.text
+	bp.me["status"] = pill_txt.text
+	bp.me["state"] = meter.state
 
 
 func _update_status(now: float) -> void:
@@ -1491,10 +1479,10 @@ func _discovery(now: float, delta: float) -> void:
 func _peer_controls(id: String) -> void:
 	var pc := _pcfg(id)
 	var pm := MarginContainer.new()
-	pm.add_theme_constant_override("margin_left", 32)
+	pm.add_theme_constant_override("margin_left", 8)
 	pm.add_theme_constant_override("margin_right", 8)
 	pm.add_theme_constant_override("margin_bottom", 8)
-	found_list.add_child(pm)
+	peer_panel.add_child(pm)
 	var v := _vbox(pm, 8)
 	var r1 := HBoxContainer.new()
 	r1.add_theme_constant_override("separation", 8)
@@ -1532,50 +1520,28 @@ func _peer_controls(id: String) -> void:
 
 
 func _rebuild_peers() -> void:
-	for ch in found_list.get_children():
+	for ch in peer_panel.get_children():
 		ch.queue_free()
-	for k in peers:
-		var p: Dictionary = peers[k]
-		var on := listening.has(k)
-		var b := Button.new()
-		b.theme_type_variation = "Row"
-		b.custom_minimum_size.y = 48
-		b.pressed.connect(_toggle_listen.bind(k))
-		found_list.add_child(b)
-		var m := MarginContainer.new()
-		m.set_anchors_preset(PRESET_FULL_RECT)
-		m.mouse_filter = MOUSE_FILTER_IGNORE
-		m.add_theme_constant_override("margin_left", 16)
-		m.add_theme_constant_override("margin_right", 16)
-		b.add_child(m)
-		var h := HBoxContainer.new()
-		h.mouse_filter = MOUSE_FILTER_IGNORE
-		h.add_theme_constant_override("separation", 16)
-		m.add_child(h)
-		var dot := _label("●", h)
-		dot.add_theme_font_size_override("font_size", 10)
-		dot.size_flags_vertical = SIZE_SHRINK_CENTER
-		dot.add_theme_color_override("font_color", C_OK if on else C_MUTED)
-		var nm := _label(p["name"], h)
-		nm.size_flags_horizontal = SIZE_EXPAND_FILL
-		nm.size_flags_vertical = SIZE_SHRINK_CENTER
-		nm.clip_text = true
-		var what: PackedStringArray = []
-		if p["snd"]:
-			what.append("son")
-		if p["mic"]:
-			what.append("micro")
-		var rl := _hint(", ".join(what) if not what.is_empty() else "ne partage rien", h)
-		rl.size_flags_vertical = SIZE_SHRINK_CENTER
-		rl.autowrap_mode = TextServer.AUTOWRAP_OFF
-		rl.add_theme_color_override("font_color", C_ACCENT if on else C_MUTED)
-		for lb in [nm, dot, rl]:
-			lb.mouse_filter = MOUSE_FILTER_IGNORE
-		if on:
-			_peer_controls(k)
-	found_lbl.visible = peers.is_empty()
-	found_lbl.text = "Aucun autre appareil détecté"
-	list_title.text = "Touchez un appareil pour l'écouter" if (not peers.is_empty() and listening.is_empty()) else "Appareils à proximité"
+	if selected_peer != "" and listening.has(selected_peer) and peers.has(selected_peer):
+		var t := _hint("Réglages : " + str(peers[selected_peer]["name"]), peer_panel)
+		t.add_theme_color_override("font_color", C_ACCENT)
+		_peer_controls(selected_peer)
+	else:
+		selected_peer = ""
+
+
+func _on_bp_click(id: String) -> void:
+	if not peers.has(id):
+		return
+	if not listening.has(id):
+		_toggle_listen(id)
+		selected_peer = id
+	elif selected_peer == id:
+		_toggle_listen(id)
+		selected_peer = ""
+	else:
+		selected_peer = id
+	peers_sig = ""
 
 
 func _broadcast_addrs() -> PackedStringArray:
